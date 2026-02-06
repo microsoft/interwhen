@@ -8,11 +8,9 @@ import re
 import numpy as np
 
 from datasets import load_dataset
-from openai import OpenAI
 
 from interwhen import stream_completion
-from interwhen.monitors import RemoveLastWait, EATMonitor, DoNothingMonitor, DeerMonitor, SimpleTextReplaceMonitor
-from interwhen.monitors import KstableAnswerGame24Monitor
+from interwhen.monitors import SimpleTextReplaceMonitor
 
 # ============== MODEL CONFIGURATION ==============
 # Change these model names to scale experiments easily
@@ -249,8 +247,8 @@ if __name__ == "__main__":
             #     expected_nums=nums,  # Validate equations use exactly these numbers
             #     answer_start_token="</think>"
             # ),) #(SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=False),)
-        else:
-            monitors = ()
+    else:
+        monitors = ()
 
     for idx in indices: #for idx in indices:
         example = dataset[idx]

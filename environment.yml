@@ -1,4 +1,4 @@
-name: vis
+name: inter
 channels:
   - defaults
 dependencies:

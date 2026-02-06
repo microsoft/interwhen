@@ -9,7 +9,7 @@ cd interwhen
 ### setup env
 ```bash
 conda env create -f environment.yml
-conda activate vis
+conda activate inter
 pip install -e .
 ```
 ### Deploy the server
@@ -31,6 +31,9 @@ python -m vllm.entrypoints.openai.api_server \
 
 ### Run scripts
 
+Simple text replacement
 ```bash
-python /examples/text_replacement_example.py
+python ./examples/text_replacement_example.py
 ```
+```bash
+python ./examples/maze_example.py

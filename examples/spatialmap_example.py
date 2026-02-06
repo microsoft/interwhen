@@ -9,10 +9,9 @@ import matplotlib.pyplot as plt
 import csv
 
 from datasets import load_dataset
-from openai import OpenAI
 
 from interwhen import stream_completion
-from interwhen.monitors import RemoveLastWait, EATMonitor, DoNothingMonitor, DeerMonitor, SimpleTextReplaceMonitor
+from interwhen.monitors import SimpleTextReplaceMonitor
 import re
 
 # ============== MODEL CONFIGURATION ==============
@@ -173,8 +172,8 @@ if __name__ == "__main__":
             #     expected_nums=nums,  # Validate equations use exactly these numbers
             #     answer_start_token="</think>"
             # ),) #(SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=False),)
-        else:
-            monitors = ()
+    else:
+        monitors = ()
 
     for idx in indices:
         example = dataset[idx]
