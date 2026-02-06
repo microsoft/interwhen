@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import csv
 
 from datasets import load_dataset
+from transformers import AutoTokenizer
 
 from interwhen import stream_completion
 from interwhen.monitors import SimpleTextReplaceMonitor, KstableAnswerMCQMonitor
@@ -27,7 +28,7 @@ def get_model_short_name(model_name: str) -> str:
     short_name = short_name.replace(" ", "_").replace(":", "-")
     return short_name
 
-def get_output_dirs(main_model: str, base_dir: str = "../MazeResults"):
+def get_output_dirs(main_model: str, base_dir: str = "../SpatialMap_results2"):
     """Create and return output directory paths based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
@@ -45,14 +46,14 @@ def get_output_dirs(main_model: str, base_dir: str = "../MazeResults"):
     
     return dirs
 
-def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../MazeResults") -> str:
+def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../SpatialMap_results2") -> str:
     """Generate log filename based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     os.makedirs(output_base, exist_ok=True)
     return os.path.join(output_base, f"EAT_{num_examples}examples.log")
 
-def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../MazeResults") -> str:
+def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../SpatialMap_results2") -> str:
     """Generate token CSV filename based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
@@ -65,7 +66,7 @@ def remove_last_paragraph(s: str) -> str:
 logger = logging.getLogger(__name__)
 
 def load_maze_dataset(split="val"):
-    ds = load_dataset("microsoft/VISION_LANGUAGE", "maze", split=split)
+    ds = load_dataset("microsoft/VISION_LANGUAGE", "spatial_map_text_only", split=split)
     return ds
 
 def init_llm_server(modelname, max_tokens=200, port=8000): #
@@ -88,17 +89,15 @@ def init_llm_server(modelname, max_tokens=200, port=8000): #
     return {"url": url, "payload": payload, "headers": headers}
 
 
-def build_prompt_from_example(example): #(original prompt config)
+def build_prompt_from_example(example):
 
-    pre_prompt = """You are an expert problem solver. Carefully read the following multiple-choice question and think through the solution step-by-step before providing your final answer. Provide your final answer option by enclosing it within \\boxed{A/B/C/D}.:"""
-
+    pre_prompt = """You are an expert problem solver. Carefully read the following multiple-choice question and think through the solution step-by-step before providing your final answer.Provide your final answer option by enclosing it within \\boxed{A/B/C/D}.:"""
     description = example.get("prompt")
     description = str(description)
 
     # remove the unecessary parts of the prompt and then add the prompt that we need.
     description = remove_last_paragraph(description)
     return pre_prompt , description
-
 
 def extract_solution(text):
     matches = re.findall(r"\\boxed\{([^}]*)\}", text)
@@ -119,9 +118,59 @@ def save_prompt(idx, prompt_with_answer, reason_dir):
     with open(filename, "w", encoding="utf-8") as f:
         f.write(prompt_with_answer)
 
+
+def count_tokens(text, tokenizer):
+    """Count the total number of tokens in the generated text using the tokenizer."""
+    tokens = tokenizer.encode(text, add_special_tokens=False)
+    return len(tokens)
+
+
+def evaluate_spatialmap_answer(answer, options, ground_truth):
+    """
+    Evaluate a SpatialMap MCQ answer and return (is_correct, extracted_answer, message).
+    
+    Args:
+        answer: Raw model output
+        options: Dictionary mapping option letters (A/B/C/D) to their values
+        ground_truth: The correct answer value
+        
+    Returns:
+        Tuple of (is_correct, extracted_answer, message)
+    """
+    sol = extract_solution(answer)
+    gt_sol = str(ground_truth).strip()
+    
+    if not sol:
+        return False, None, "No expression found"
+    
+    sol = sol.strip()
+    
+    # Case 1: LLM returned option letter (A/B/C/D)
+    if sol in options:
+        if options[sol] == gt_sol:
+            return True, sol, f"Correct: option {sol} -> {options[sol]}"
+        else:
+            return False, sol, f"Incorrect: expected '{gt_sol}', got '{options[sol]}' (option {sol})"
+    
+    # Case 2: LLM returned the actual answer text
+    # First check if sol matches ground truth directly
+    if sol.lower() == gt_sol.lower():
+        return True, sol, f"Correct: answer text matches ground truth: {sol}"
+    
+    # Check if sol matches any option value
+    for opt_letter, opt_value in options.items():
+        if sol.lower() == opt_value.lower():
+            if opt_value == gt_sol:
+                return True, sol, f"Correct: answer text {sol} (option {opt_letter})"
+            else:
+                return False, sol, f"Incorrect: expected '{gt_sol}', got '{opt_value}' (option {opt_letter})"
+    
+    return False, sol, f"Solution '{sol}' not found in options or ground truth"
+
+
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(description="Maze problem solver with LLM and monitors")
+    parser = argparse.ArgumentParser(description="SpatialMap problem solver with LLM and monitors")
     parser.add_argument("--thinking", "-t", action="store_true", help="Enable chain-of-thought output")
     parser.add_argument("--monitor", "-m", default = True, action="store_true", help="Enable step-by-step monitor")
     parser.add_argument("--num_examples", "-n", type=int, default=1500, help="Number of examples to run")
@@ -130,9 +179,11 @@ if __name__ == "__main__":
     parser.add_argument("--earlystop_model", type=str, default=EARLYSTOP_MODEL, help="Model to use for early stopping")
     args = parser.parse_args()
 
+    # Use models from args (allows command-line override)
     main_model = args.main_model
     earlystop_model = args.earlystop_model
     
+    # Setup output directories based on model name
     output_dirs = get_output_dirs(main_model)
     logfile = get_log_filename(main_model, args.num_examples)
     token_filename = get_token_filename(main_model, args.num_examples)
@@ -158,21 +209,30 @@ if __name__ == "__main__":
 
     llm_server = init_llm_server(main_model, max_tokens=15000)
 
+    # Load tokenizer for accurate token counting
+    logger.info(f"Loading tokenizer for {main_model}...")
+    tokenizer = AutoTokenizer.from_pretrained(main_model, trust_remote_code=True)
+    logger.info("Tokenizer loaded successfully.")
+
     num_correct = 0
     N = args.num_examples
+    total_generated_tokens = 0
+    generated_token_counts = []
     total = len(dataset)
-    indices = np.linspace(3000, total-1, N, dtype=int).tolist()
+    indices = np.linspace(0, total-1, N, dtype=int)
 
     for idx in indices:
         example = dataset[idx]
         prompt1, prompt2 = build_prompt_from_example(example)
         if str(example.get("ground_truth", "")).strip() == "Q4":
-            target_options = ["A", "B"]
+                target_options = ["A", "B"]
         else:
             target_options = ["A", "B", "C", "D"] 
         keys = "|".join(map(re.escape, target_options))
-        pattern = rf'\b({keys})\.\s*([A-Za-z0-9]+)\b'
-        options = dict(re.findall(pattern, prompt2))
+        pattern = r'\b([A-D])\.\s*(.*?)(?=\s*[A-D]\.|$)'
+        raw = re.findall(pattern, prompt2, flags=re.DOTALL)
+
+        options = {k: v.strip().rstrip(".") for k, v in raw}
 
         if args.monitor:
             # Use K-stable answer monitor to detect when equation stabilizes k times
@@ -190,7 +250,6 @@ if __name__ == "__main__":
         logger.info(f"---- Example {idx} ----")
 
         # Run LLM with streaming + monitor
-
         answer = asyncio.run(stream_completion(
             f"<|im_start|>system\n{prompt1}<|im_end|>\n<|im_start|>user\n{prompt2}<|im_end|>\n<|im_start|>assistant\n",
             llm_server=llm_server,
@@ -199,47 +258,53 @@ if __name__ == "__main__":
             termination_requires_validation=False,
             async_execution=True
         ))
-
         save_prompt(idx, answer, reason_dir)
         logger.info(f"Raw final output:\n{answer}")
-        sol = extract_solution(answer)
-        gt_sol = str(example.get("ground_truth", "")).strip()         
-        if not sol:
-            logger.info("No expression found.")
-            continue          
-        sol = sol.strip()      
-        # Case 1: LLM returned option letter (A/B/C/D)
-        if sol in options:
-            logger.info(f"Extracted option letter: {sol} -> {options[sol]}")
-            if options[sol] == gt_sol:
-                logger.info("Correct solution answer matches")
-                num_correct += 1
-            else:
-                logger.info(f"Incorrect solution: expected '{gt_sol}', got '{options[sol]}'")
-        else:
-            # Case 2: LLM returned the actual answer text
-            # Check if sol matches any option value or ground truth directly
-            matched = False
-            
-            # First check if sol matches ground truth directly
-            if sol.lower() == gt_sol.lower():
-                logger.info(f"Extracted answer text matches ground truth: {sol}")
-                num_correct += 1
-                matched = True
-            else:
-                # Check if sol matches any option value
-                for opt_letter, opt_value in options.items():
-                    if sol.lower() == opt_value.lower():
-                        logger.info(f"Extracted answer text: {sol} (option {opt_letter})")
-                        if opt_value == gt_sol:
-                            logger.info("Correct solution answer matches")
-                            num_correct += 1
-                        else:
-                            logger.info(f"Incorrect solution: expected '{gt_sol}', got '{opt_value}'")
-                        matched = True
-                        break
-            
-            if not matched:
-                logger.info(f"Solution '{sol}' not found in options or ground truth")
 
-    print(f"\nFinal Accuracy: {num_correct}/{N}")
+        generated_tokens = count_tokens(answer, tokenizer)
+        generated_token_counts.append(generated_tokens)
+        total_generated_tokens += generated_tokens
+        logger.info(f"Generated tokens in this example: {generated_tokens}")
+
+        # Evaluate the answer
+        gt_sol = str(example.get("ground_truth", "")).strip()
+        is_correct, extracted_answer, message = evaluate_spatialmap_answer(answer, options, gt_sol)
+        
+        if extracted_answer:
+            logger.info(f"Extracted answer: {extracted_answer}")
+        logger.info(message)
+        
+        if is_correct:
+            num_correct += 1
+
+    # Calculate final statistics
+    avg_generated_tokens = total_generated_tokens / N if N > 0 else 0
+    accuracy = num_correct / N if N > 0 else 0
+    
+    print(f"\nFinal Accuracy: {num_correct}/{N} ({accuracy:.2%})")
+    print(f"Average Generated Tokens: {avg_generated_tokens:.2f}")
+    print(f"Total Generated Tokens: {total_generated_tokens}")
+    
+    # Save results to a text file
+    results_file = logfile.replace('.log', '_results.txt')
+    with open(results_file, 'w') as f:
+        f.write(f"SpatialMap Evaluation Results\n")
+        f.write(f"{'='*50}\n\n")
+        f.write(f"Model: {main_model}\n")
+        f.write(f"Number of Examples: {N}\n")
+        f.write(f"Monitor Enabled: {args.monitor}\n\n")
+        f.write(f"Results:\n")
+        f.write(f"---------\n")
+        f.write(f"Correct: {num_correct}/{N}\n")
+        f.write(f"Accuracy: {accuracy:.2%}\n\n")
+        f.write(f"Generated Token Statistics:\n")
+        f.write(f"---------------------------\n")
+        f.write(f"Total Generated Tokens: {total_generated_tokens}\n")
+        f.write(f"Average Generated Tokens: {avg_generated_tokens:.2f}\n")
+        if generated_token_counts:
+            f.write(f"Min Generated Tokens: {min(generated_token_counts)}\n")
+            f.write(f"Max Generated Tokens: {max(generated_token_counts)}\n")
+            f.write(f"Std Dev: {np.std(generated_token_counts):.2f}\n")
+    
+    logger.info(f"Results saved to {results_file}")
+    print(f"Results saved to {results_file}")
