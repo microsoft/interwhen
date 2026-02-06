@@ -11,7 +11,7 @@ import csv
 from datasets import load_dataset
 
 from interwhen import stream_completion
-from interwhen.monitors import SimpleTextReplaceMonitor
+from interwhen.monitors import SimpleTextReplaceMonitor, KstableAnswerMCQMonitor
 import re
 
 # ============== MODEL CONFIGURATION ==============
@@ -163,18 +163,6 @@ if __name__ == "__main__":
     total = len(dataset)
     indices = np.linspace(3000, total-1, N, dtype=int).tolist()
 
-    if args.monitor:
-            # Use K-stable answer monitor to detect when equation stabilizes k times
-            monitors = (SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=False),)
-            # monitors=(KstableAnswerGame24Monitor(
-            #     name="game24_kstable",
-            #     k=3,
-            #     expected_nums=nums,  # Validate equations use exactly these numbers
-            #     answer_start_token="</think>"
-            # ),) #(SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=False),)
-    else:
-        monitors = ()
-
     for idx in indices:
         example = dataset[idx]
         prompt1, prompt2 = build_prompt_from_example(example)
@@ -185,6 +173,18 @@ if __name__ == "__main__":
         keys = "|".join(map(re.escape, target_options))
         pattern = rf'\b({keys})\.\s*([A-Za-z0-9]+)\b'
         options = dict(re.findall(pattern, prompt2))
+
+        if args.monitor:
+            # Use K-stable answer monitor to detect when equation stabilizes k times
+            # monitors = (SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=False),)
+            monitors=(KstableAnswerMCQMonitor(
+                name="maze_kstable",
+                k=3,
+                options=options,  # Validate equations use exactly these numbers
+                answer_start_token="</think>"
+            ),)
+        else:
+            monitors = ()
 
         logger.info(f"---- length of monitors {len(monitors)} ----")
         logger.info(f"---- Example {idx} ----")

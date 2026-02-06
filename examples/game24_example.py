@@ -10,7 +10,7 @@ import numpy as np
 from datasets import load_dataset
 
 from interwhen import stream_completion
-from interwhen.monitors import SimpleTextReplaceMonitor
+from interwhen.monitors import SimpleTextReplaceMonitor, KstableAnswerGame24Monitor
 
 # ============== MODEL CONFIGURATION ==============
 # Change these model names to scale experiments easily
@@ -238,23 +238,23 @@ if __name__ == "__main__":
     # total = len(dataset)
     indices = np.linspace(0, len(dataset)-1, N, dtype=int)
 
-    if args.monitor:
-            # Use K-stable answer monitor to detect when equation stabilizes k times
-            monitors = (SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=False),)
-            # monitors=(KstableAnswerGame24Monitor(
-            #     name="game24_kstable",
-            #     k=3,
-            #     expected_nums=nums,  # Validate equations use exactly these numbers
-            #     answer_start_token="</think>"
-            # ),) #(SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=False),)
-    else:
-        monitors = ()
-
     for idx in indices: #for idx in indices:
         example = dataset[idx]
         nums = example["numbers"]
 
         prompt = build_prompt(nums)
+
+        if args.monitor:
+            # Use K-stable answer monitor to detect when equation stabilizes k times
+            monitors = (SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=False),)
+            monitors=(KstableAnswerGame24Monitor(
+                name="game24_kstable",
+                k=3,
+                expected_nums=nums,  # Validate equations use exactly these numbers
+                answer_start_token="</think>"
+            ),)
+        else:
+            monitors = ()
 
         logger.info(f"---- length of monitors {len(monitors)} ----")
         logger.info(f"---- Example {idx+1} ----")

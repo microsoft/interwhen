@@ -29,11 +29,32 @@ python -m vllm.entrypoints.openai.api_server \
 (SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=False),)
 ```
 
+#### K stable answer monitors
+```bash
+KstableAnswerMCQMonitor(
+                name="maze_kstable",
+                k=3,
+                options=options,  # Validate equations use exactly these numbers
+                answer_start_token="</think>"
+            )
+
+KstableAnswerGame24Monitor(
+                name="game24_kstable",
+                k=3,
+                expected_nums=nums,  # Validate equations use exactly these numbers
+                answer_start_token="</think>"
+            )
+```
+
 ### Run scripts
 
 Simple text replacement
 ```bash
 python ./examples/text_replacement_example.py
 ```
+Various datasets
 ```bash
-python ./examples/maze_example.py
+python ./examples/maze_example.py -n 1
+python ./examples/game24_example.py -n 1
+python ./examples/spatialmap_example.py -n 1
+```
