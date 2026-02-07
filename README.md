@@ -14,7 +14,7 @@ A detailed discussion of interwhen, including how it was developed and tested, c
 git clone https://github.com/microsoft/interwhen.git
 cd interwhen
 ```
-### setup env
+## setup env
 ```bash
 conda env create -f environment.yml
 conda activate inter
@@ -32,41 +32,120 @@ python -m vllm.entrypoints.openai.api_server \
   --tensor-parallel-size 8
   ```
 
-### Monitors
+## Quick Start
 
-#### Simple text replacement monitor
+### Simple text replacement example:
+
 ```bash
-(SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=False),)
+python /examples/text_replacement_example.py
 ```
 
-#### K stable answer monitors
+In the above script we call the function stream_completion, you can pass your own custom monitor that you would want to use to intervene
+
+```bash
+stream_completion(
+    text,
+    llm_server=llm_server,
+    monitors=(SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=True),),
+    add_delay=False,
+    termination_requires_validation=False,
+    async_execution=True
+)
+```
+
+You can change the monitors, which you can keep it custom. 
+See "interwhen/interwhen/monitors/base.py" for the abstract class of monitors
+
+## InBuilt Monitors
+
+### Early stopping Monitors:
+
+#### EAT (Entropy after </think>)
+```bash
+EATMonitor(
+    name="EAT_monitor",
+    model_name=earlystop_model,
+    alpha=0.2,
+    delta=0.0002,
+    min_steps=4,
+    answer_start_token="</think>",
+    async_execution=True
+)
+```
+#### DEER (Dynamic Early exit of reasoning models)
+```bash
+DEERMonitor(
+    name="DEER_monitor",
+    model_name=earlystop_model,
+    threshold=0.80,  # Example threshold for geometric mean confidence
+    answer_start_token="</think>",
+    async_execution=True
+)
+```
+
+#### K stable answer monitors (Ours)
 ```bash
 KstableAnswerMCQMonitor(
-                name="maze_kstable",
-                k=3,
-                options=options,  # Validate equations use exactly these numbers
-                answer_start_token="</think>"
-            )
+    name="maze_kstable",
+    k=3,
+    options=options,  # Validate equations use exactly these numbers
+    answer_start_token="</think>"
+)
 
 KstableAnswerGame24Monitor(
-                name="game24_kstable",
-                k=3,
-                expected_nums=nums,  # Validate equations use exactly these numbers
-                answer_start_token="</think>"
-            )
+    name="game24_kstable",
+    k=3,
+    expected_nums=nums,  # Validate equations use exactly these numbers
+    answer_start_token="</think>"
+)
+```
+
+### Test time Verification monitors:
+
+```bash
+StepVerifierGame24Monitor(
+    name="game24_kstable",
+    answer_start_token = "</think>",
+    original_numbers=nums,  # Validate equations use exactly these numbers
+)
+
+python ./examples/TTSwithVerification/game24_stepverifier.py
+
+StepVerifierMazeMonitor(
+    name="maze_step_verifier",
+    answer_start_token="</think>",
+    grid=grid,
+    start_pos=start_pos,
+    exit_pos=exit_pos,
+    max_corrections=args.max_corrections,
+    question_type=question_type,
+)
+
+python ./examples/TTSwithVerification/maze_stepverifier.py
+
+StepVerifierSpatialMapMonitor.from_prompt(
+    problem_text=user_prompt,
+    max_corrections=args.max_corrections,
+    name="spatialmap_step_verifier"
+)
+
+python ./examples/TTSwithVerification/spatialmap_stepverifier.py
 ```
 
 ## Examples
 
-Simple text replacement
+Early stopping scripts
 ```bash
-python ./examples/text_replacement_example.py
+python ./examples/EarlyStopping/maze_example.py -n 1
+python ./examples/EarlyStopping/game24_example.py -n 1
+python ./examples/EarlyStopping/spatialmap_example.py -n 1
 ```
-Various datasets
+
+TTS scripts
 ```bash
-python ./examples/maze_example.py -n 1
-python ./examples/game24_example.py -n 1
-python ./examples/spatialmap_example.py -n 1
+python ./examples/TTSwithVerification/maze_example.py -n 1
+python ./examples/TTSwithVerification/game24_example.py -n 1
+python ./examples/TTSwithVerification/spatialmap_example.py -n 1
 ```
 
 ## Intended Uses

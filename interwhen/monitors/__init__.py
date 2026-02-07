@@ -1,3 +1,4 @@
 from .textReplacement import SimpleTextReplaceMonitor
 from .k_stable import KstableAnswerMCQMonitor, KstableAnswerGame24Monitor
 from .stepVerifier import StepVerifierGame24Monitor, StepVerifierMazeMonitor, StepVerifierSpatialMapMonitor
+from .earlyStopping import EATMonitor, DEERMonitor

@@ -12,7 +12,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 
 from interwhen import stream_completion
-from interwhen.monitors import SimpleTextReplaceMonitor, KstableAnswerMCQMonitor
+from interwhen.monitors import SimpleTextReplaceMonitor, KstableAnswerMCQMonitor, EATMonitor, DEERMonitor
 import re
 
 # ============== MODEL CONFIGURATION ==============

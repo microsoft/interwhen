@@ -11,7 +11,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 
 from interwhen import stream_completion
-from interwhen.monitors import SimpleTextReplaceMonitor, KstableAnswerGame24Monitor
+from interwhen.monitors import SimpleTextReplaceMonitor, KstableAnswerGame24Monitor, EATMonitor, DEERMonitor
 
 # ============== MODEL CONFIGURATION ==============
 # Change these model names to scale experiments easily
@@ -273,12 +273,23 @@ if __name__ == "__main__":
         if args.monitor:
             # Use K-stable answer monitor to detect when equation stabilizes k times
             # monitors = (SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=False),)
-            monitors=(KstableAnswerGame24Monitor(
-                name="game24_kstable",
-                k=3,
-                expected_nums=nums,  # Validate equations use exactly these numbers
-                answer_start_token="</think>"
-            ),)
+            # monitors=(KstableAnswerGame24Monitor(
+            #     name="game24_kstable",
+            #     k=3,
+            #     expected_nums=nums,  # Validate equations use exactly these numbers
+            #     answer_start_token="</think>"
+            # ),)
+            monitors = (
+                EATMonitor(
+                    name="EAT_monitor",
+                    model_name=earlystop_model,
+                    alpha=0.2,
+                    delta=0.02,
+                    min_steps=4,
+                    answer_start_token="</think>",
+                    async_execution=True
+                ),
+            )
         else:
             monitors = ()
 
