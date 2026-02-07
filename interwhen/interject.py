@@ -2,9 +2,6 @@ import asyncio
 import httpx
 import json
 import logging
-import csv
-import os
-import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 
