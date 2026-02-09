@@ -118,7 +118,7 @@ Improve reasoning accuracy by verifying intermediate steps and injecting correct
 | **StepVerifierMazeMonitor** | Maze navigation | Grid-based verification of moves, turns, and position tracking |
 | **StepVerifierSpatialMapMonitor** | Spatial reasoning | Z3 constraint solver for directional relationship claims |
 
-📖 **[Full documentation and parameter reference →](./examples/TTSwithVerification/TTSwithverification.md)**
+📖 **[Full documentation and parameter reference →](./examples/TTSwithVerification/README.md)**
 
 ### Early Stopping Monitors
 
@@ -131,7 +131,7 @@ Reduce inference cost by detecting when the model has reached sufficient confide
 | **KstableAnswerMCQMonitor** | Same MCQ answer appears `k` consecutive times | `k`, `options` |
 | **KstableAnswerGame24Monitor** | Same equation appears `k` consecutive times | `k`, `expected_nums` |
 
-📖 **[Full documentation and parameter reference →](./examples/EarlyStopping/earlystopping.md)**
+📖 **[Full documentation and parameter reference →](./examples/EarlyStopping/README.md)**
 
 
 ## Creating custom verifiers and monitors
