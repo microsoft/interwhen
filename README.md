@@ -34,6 +34,13 @@ Verifiers are executed asynchronously and intervene only when violations are det
 
 The framework provides a general API for interaction between language models and verifiers, including neural, neurosymbolic, and symbolic components. Verifiers may operate on partial outputs or final answers. 
 
+----------------
+
+At a conceptual level, interwhen reframes reliability in language models:
+
+> Instead of asking whether a model is accurate on average, we ask whether a particular output satisfies explicit, verifiable constraints.
+
+By integrating verification directly into generation, interwhen provides a general mechanism for improving the soundness of reasoning systems without restricting model expressivity or requiring retraining.
 
 ## Verifier-guided Reasoning in Three Lines 
 Running verifier-guided inference requires only a few lines of code: just specify the list of monitors to be used with a target LLM. Each monitor requires specifying the kind of verifier, when it should be invoked (e.g., each step or after a reflection token like 'Wait'), and the text pattern to intervene with. 
@@ -57,26 +64,31 @@ stream_completion(
     async_execution=True
 )
 ```
-The above code implements a simple monitor that replaces all occurences of "is" with "isn't".  You can run the full example here, `python ./examples/text_replacement_example.py`.
+The above code implements a simple monitor that watches the model's output stream and replaces all occurences of "is" with "isn't". It can be replaced with your custom monitor, e.g., for checking logical correctness or domain-specific constraints.  You can run the full example here, `python ./examples/text_replacement_example.py`.
 
 <INSERT ANIMATIONS>
-----------------
 
-At a conceptual level, interwhen reframes reliability in language models:
+The table below shows the latency impact of the monitor. When the stream contains the target word ("is"), the monitor activates and performs the replacement, adding some overhead. When the target word is absent, the monitor has negligible impact on latency.
 
-> Instead of asking whether a model is accurate on average, we ask whether a particular output satisfies explicit, verifiable constraints.
+| Stream content | Monitor | Latency (s) |
+|----------------|---------|-------------|
+| Contains "is" (monitor activates) | enabled | 12.97 ± 2.97 |
+| Contains "is" (monitor activates) | disabled | 8.36 ± 0.01 |
+| Does not contain "is" (monitor idle) | enabled | 7.31 ± 1.16 |
+| Does not contain "is" (monitor idle) | disabled | 7.35 ± 1.17 |
 
-By integrating verification directly into generation, interwhen provides a general mechanism for improving the soundness of reasoning systems without restricting model expressivity or requiring retraining.
 
 ## Installation
 
-### Clone repo
+**Clone repo**
 ```bash
 git clone https://github.com/microsoft/interwhen.git
 cd interwhen
 ```
 It is recommended to setup a fresh environment before installing the library.
-## setup env
+
+**setup env**
+
 ```bash
 pip install -e .
 ```
@@ -89,91 +101,65 @@ pip install -e .
 python ./examples/text_replacement_example.py
 ```
 
+
+TTS with verification scripts
+```bash
+
+```
 ### Test-time verification 
 We provide examples using three datasets: Maze, Game of 24, and SpatialMap. 
 
 ```bash
-python ./examples/TTSwithVerification/maze_example.py -n 1
-python ./examples/TTSwithVerification/game24_example.py -n 1
-python ./examples/TTSwithVerification/spatialmap_example.py -n 1
+python ./examples/TTSwithVerification/[your_dataset]_stepverifier.py -n 1 # dataset=maze,game24, or spatialmap
 ```
 
 ### Monitors for Early stopping
 ```bash
-python ./examples/EarlyStopping/maze_example.py -n 1
-python ./examples/EarlyStopping/game24_example.py -n 1
-python ./examples/EarlyStopping/spatialmap_example.py -n 1
+python ./examples/EarlyStopping/[your_dataset]_example.py -n 1
 ```
-
-#### EAT (Entropy after </think>)
-```bash
-EATMonitor(
-    name="EAT_monitor",
-    model_name=earlystop_model,
-    alpha=0.2,
-    delta=0.0002,
-    min_steps=4,
-    answer_start_token="</think>",
-    async_execution=True
-)
-```
-#### DEER (Dynamic Early exit of reasoning models)
-```bash
-DEERMonitor(
-    name="DEER_monitor",
-    model_name=earlystop_model,
-    threshold=0.80,  # Example threshold for geometric mean confidence
-    answer_start_token="</think>",
-    async_execution=True
-)
-```
-
-#### K stable answer monitors (Ours)
-```bash
-KstableAnswerMCQMonitor(
-    name="maze_kstable",
-    k=3,
-    options=options,  # Validate equations use exactly these numbers
-    answer_start_token="</think>"
-)
-
-KstableAnswerGame24Monitor(
-    name="game24_kstable",
-    k=3,
-    expected_nums=nums,  # Validate equations use exactly these numbers
-    answer_start_token="</think>"
-)
-```
-
-### Test time Verification monitors:
-
-```bash
-StepVerifierGame24Monitor(
-    name="game24_kstable",
-    answer_start_token = "</think>",
-    original_numbers=nums,  # Validate equations use exactly these numbers
-)
-
-python ./examples/TTSwithVerification/game24_stepverifier.py
-
-StepVerifierMazeMonitor(
-    name="maze_step_verifier",
-    answer_start_token="</think>",
-    grid=grid,
-    start_pos=start_pos,
-    exit_pos=exit_pos,
-    max_corrections=args.max_corrections,
-    question_type=question_type,
-)
-
-python ./examples/TTSwithVerification/maze_stepverifier.py
 
 StepVerifierSpatialMapMonitor.from_prompt(
     problem_text=user_prompt,
     max_corrections=args.max_corrections,
     name="spatialmap_step_verifier"
 )
-```
+
+
+## InBuilt Monitors
+
+interwhen includes two families of monitors:
+### Test-Time Verification Monitors
+
+Improve reasoning accuracy by verifying intermediate steps and injecting corrective feedback when errors are detected.
+
+| Monitor | Domain | Verifier |
+|---------|--------|----------|
+| **StepVerifierGame24Monitor** | Game of 24 | Arithmetic validation of each step's operation and remaining numbers |
+| **StepVerifierMazeMonitor** | Maze navigation | Grid-based verification of moves, turns, and position tracking |
+| **StepVerifierSpatialMapMonitor** | Spatial reasoning | Z3 constraint solver for directional relationship claims |
+
+📖 **[Full documentation and parameter reference →](./examples/TTSwithVerification/TTSwithverification.md)**
+
+### Early Stopping Monitors
+
+Reduce inference cost by detecting when the model has reached sufficient confidence and terminating generation early.
+
+| Monitor | Strategy | Key Parameter |
+|---------|----------|---------------|
+| **EAT** | Entropy variance of next-token drops below threshold | `delta` (EMA variance threshold) |
+| **DEER** | Geometric mean answer confidence exceeds threshold | `threshold` (confidence threshold) |
+| **KstableAnswerMCQMonitor** | Same MCQ answer appears `k` consecutive times | `k`, `options` |
+| **KstableAnswerGame24Monitor** | Same equation appears `k` consecutive times | `k`, `expected_nums` |
+
+📖 **[Full documentation and parameter reference →](./examples/EarlyStopping/earlystopping.md)**
+
+
+## Creating custom verifiers and monitors
+You can create your own custom monitors by subclassing `VerifyMonitor` in `interwhen/monitors/base.py`. A custom monitor requires implementing three methods:
+
+- **`step_extractor(chunk, generated_text)`** — Determines *when* to intervene by detecting meaningful reasoning steps in the model's streaming output. Returns a boolean indicating whether a new step has been identified and should be verified.
+- **`verify(chunk, token_index, event, event_info)`** — Checks the correctness of the extracted step using domain-specific logic (symbolic solvers, rule checks, etc.) and signals whether a correction is needed.
+- **`fix(generated_text, event_info)`** — Constructs the corrective feedback that is injected into the model's generation stream to steer it back on track.
 
 ## Intended Uses
 - interwhen was developed to improve the quality of a reasoning model’s outputs without requiring finetuning.
