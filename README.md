@@ -40,9 +40,9 @@ python -m vllm.entrypoints.openai.api_server \
 python ./examples/text_replacement_example.py
 ```
 
-In the above script we call the function stream_completion, you can pass your own custom monitor that you would want to use to intervene
+In the above script we call the function `stream_completion` with a `SimpleTextReplaceMonitor` that watches the model's output stream for the word **"is"** and replaces it with **"isn't"**. You can pass your own custom monitor to intervene in any way you need.
 
-```bash
+```python
 stream_completion(
     text,
     llm_server=llm_server,
@@ -52,6 +52,15 @@ stream_completion(
     async_execution=True
 )
 ```
+
+The table below shows the latency impact of the monitor. When the stream contains the target word ("is"), the monitor activates and performs the replacement, adding some overhead. When the target word is absent, the monitor has negligible impact on latency.
+
+| Stream content | Monitor | Latency (s) |
+|----------------|---------|-------------|
+| Contains "is" (monitor activates) | enabled | 12.97 ± 2.97 |
+| Contains "is" (monitor activates) | disabled | 8.36 ± 0.01 |
+| Does not contain "is" (monitor idle) | enabled | 7.31 ± 1.16 |
+| Does not contain "is" (monitor idle) | disabled | 7.35 ± 1.17 |
 
 You can create your own custom monitors by subclassing `VerifyMonitor` in `interwhen/monitors/base.py`. A custom monitor requires implementing three methods:
 
