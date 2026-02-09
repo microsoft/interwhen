@@ -28,7 +28,7 @@ def get_model_short_name(model_name: str) -> str:
     short_name = short_name.replace(" ", "_").replace(":", "-")
     return short_name
 
-def get_output_dirs(main_model: str, base_dir: str = "../SpatialMap_results2"):
+def get_output_dirs(main_model: str, base_dir: str = "../../Outputs/SpatialMap_results2"):
     """Create and return output directory paths based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
@@ -46,14 +46,14 @@ def get_output_dirs(main_model: str, base_dir: str = "../SpatialMap_results2"):
     
     return dirs
 
-def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../SpatialMap_results2") -> str:
+def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs/SpatialMap_results2") -> str:
     """Generate log filename based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     os.makedirs(output_base, exist_ok=True)
     return os.path.join(output_base, f"EAT_{num_examples}examples.log")
 
-def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../SpatialMap_results2") -> str:
+def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs/SpatialMap_results2") -> str:
     """Generate token CSV filename based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)

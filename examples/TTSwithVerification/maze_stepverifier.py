@@ -35,7 +35,7 @@ def get_model_short_name(model_name: str) -> str:
     return short_name
 
 
-def get_output_dirs(main_model: str, base_dir: str = "../MazeResults_StepVerifier"):
+def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/MazeResults"):
     """Create and return output directory paths based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)

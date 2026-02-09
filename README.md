@@ -37,7 +37,7 @@ python -m vllm.entrypoints.openai.api_server \
 ### Simple text replacement example:
 
 ```bash
-python /examples/text_replacement_example.py
+python ./examples/text_replacement_example.py
 ```
 
 In the above script we call the function stream_completion, you can pass your own custom monitor that you would want to use to intervene
