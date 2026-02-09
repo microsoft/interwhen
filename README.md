@@ -181,11 +181,11 @@ At a high level, we found that interwhen allows a plug-and-play solution for imp
 Better performance can be achieved by assessing the utility of included verifiers for your task and activating only the necessary ones.
 We strongly encourage users to use LLMs/MLLMs that support robust Responsible AI mitigations, such as Azure Open AI (AOAI) services. Such services continually update their safety and RAI mitigations with the latest industry standards for responsible use. For more on AOAI’s best practices when employing foundations models for scripts and applications:
 
-- [What is Azure AI Content Safety?] (https://learn.microsoft.com/en-us/azure/ai-services/content-safety/overview)
-- [Overview of Responsible AI practices for Azure OpenAI models] (https://learn.microsoft.com/en-us/legal/cognitive-services/openai/overview)
+- [What is Azure AI Content Safety?](https://learn.microsoft.com/en-us/azure/ai-services/content-safety/overview)
+- [Overview of Responsible AI practices for Azure OpenAI models](https://learn.microsoft.com/en-us/legal/cognitive-services/openai/overview)
 - [Azure OpenAI Transparency Note](https://learn.microsoft.com/en-us/legal/cognitive-services/openai/transparency-note)
-- [OpenAI’s Usage policies] (https://openai.com/policies/usage-policies)
-- [Azure OpenAI’s Code of Conduct] (https://learn.microsoft.com/en-us/legal/cognitive-services/openai/code-of-conduct)
+- [OpenAI’s Usage policies](https://openai.com/policies/usage-policies)
+- [Azure OpenAI’s Code of Conduct](https://learn.microsoft.com/en-us/legal/cognitive-services/openai/code-of-conduct)
 
 ## License
 MIT License
