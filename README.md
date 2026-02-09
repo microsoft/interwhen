@@ -7,32 +7,23 @@ While modern language models achieve high average performance, aggregate metrics
 interwhen addresses the problem by providing a plug-and-play mechanism to improve instance-level reliability of any language model, which we call *verifier-guided reasoning*. Instead of verifying only the final output, the framework enables verification of intermediate reasoning traces during generation. When a violation is detected, the system can steer, revise, or halt generation. If no output is produced, the system abstains; if an output is produced, it satisfies the specified verifiers.
 
 
-From a research perspective, interwhen introduces verifier compute as a new axis for test-time scaling and provides a testbed for verifier development. 
+From a research perspective, interwhen makes two contributions.
 
-**A New Axis for Test-Time Scaling**
+**A New Axis for Test-Time Scaling**: Introduces verifier compute as an additional dimension of scaling at inference time. Rather than scaling model size or sampling alone, performance can be improved by allocating compute to structured verification.
 
-Introduces verifier compute as an additional dimension of scaling at inference time. Rather than scaling model size or sampling alone, performance can be improved by allocating compute to structured verification.
-
-**A Testbed for Verifier Development**
-Enables systematic evaluation of verifier designs at inference time before incorporating them into training objectives (e.g., as reward models or critics).
+**A Testbed for Verifier Development**: Enables systematic evaluation of verifier designs at inference time before incorporating them into training objectives (e.g., as reward models or critics).
 
 
-A detailed discussion of interwhen, including how it was developed and tested, can be found in our paper at: [link]().
+A detailed discussion of interwhen, including how it was developed and tested, can be found in our [paper]().
 
 ## Key Features
-interwhen changes the inference pipeline of a language model by creating an auxiliary Monitor model that runs alongside the model and interacts with the model’s output to improve its quality. The Monitor agent reads the output of a language model in real time and calls necessary verifiers to check its validity. Based on the objectivity of a domain, verifiers can be symbolic, neuro-symbolic or even fully neural verifiers.
+interwhen changes the inference pipeline of a language model by creating an auxiliary Monitor model that runs alongside the model and interacts with the model’s output to improve its quality. The Monitor agent reads the output of a language model in real time and calls necessary verifiers to check its validity. 
 
-1. **Verification During Generation**
+1. **Verification During Generation**: interwhen verifies reasoning traces as they are produced, without requiring external step extraction or structured decomposition. This allows the model to retain flexible reasoning strategies while remaining subject to correctness constraints.
 
-interwhen verifies reasoning traces as they are produced, without requiring external step extraction or structured decomposition. This allows the model to retain flexible reasoning strategies while remaining subject to correctness constraints.
+2. **Asynchronous and Efficient Execution**: Verifiers are executed asynchronously and intervene only when violations are detected, minimizing inference overhead while preserving responsiveness.
 
-2. **Asynchronous and Efficient Execution**
-
-Verifiers are executed asynchronously and intervene only when violations are detected, minimizing inference overhead while preserving responsiveness.
-
-3. **Unified Model–Verifier Interface**
-
-The framework provides a general API for interaction between language models and verifiers, including neural, neurosymbolic, and symbolic components. Verifiers may operate on partial outputs or final answers. 
+3. **Unified Model–Verifier Interface**: The framework provides a general API for interaction between language models and different kind of verifiers. Based on the objectivity of a domain, verifiers can be symbolic, neuro-symbolic or even fully neural verifiers. They can operate on partial outputs,  final answers, or both. 
 
 ----------------
 
@@ -64,7 +55,7 @@ stream_completion(
     async_execution=True
 )
 ```
-The above code implements a simple monitor that watches the model's output stream and replaces all occurences of "is" with "isn't". It can be replaced with your custom monitor, e.g., for checking logical correctness or domain-specific constraints.  You can run the full example here, `python ./examples/text_replacement_example.py`.
+The above code implements a simple monitor that watches the model's output stream and replaces all occurences of "is" with "isn't". It can be replaced with your custom monitor, e.g., for checking logical correctness or domain-specific constraints.  You can run the full example [here](python ./examples/text_replacement_example.py).
 
 <INSERT ANIMATIONS>
 
@@ -87,25 +78,21 @@ cd interwhen
 ```
 It is recommended to setup a fresh environment before installing the library.
 
-**setup env**
+**Install dependencies**
 
 ```bash
 pip install -e .
 ```
 
-## Quick Start Examples
-
-### Simple text replacement monitor:
+**Test installation**
+Run the following script to reproduce the text replacement example from above. 
 
 ```bash
 python ./examples/text_replacement_example.py
 ```
 
+## Examples
 
-TTS with verification scripts
-```bash
-
-```
 ### Test-time verification 
 We provide examples using three datasets: Maze, Game of 24, and SpatialMap. 
 
@@ -118,14 +105,7 @@ python ./examples/TTSwithVerification/[your_dataset]_stepverifier.py -n 1 # data
 python ./examples/EarlyStopping/[your_dataset]_example.py -n 1
 ```
 
-StepVerifierSpatialMapMonitor.from_prompt(
-    problem_text=user_prompt,
-    max_corrections=args.max_corrections,
-    name="spatialmap_step_verifier"
-)
-
-
-## InBuilt Monitors
+## Available Monitors
 
 interwhen includes two families of monitors:
 ### Test-Time Verification Monitors
