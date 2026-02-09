@@ -1,11 +1,72 @@
-# interwhen: Verifiable Reasoning
+# interwhen: Verifiable Reasoning with Language Models
 
-interwhen is a Python library that enables interjecting the output tokens of any language model during inference. Instead of passively waiting for the model to finish generating, interwhen analyzes intermediate reasoning steps and provides corrective feedback from external verifiers to guide the model’s reasoning to be more accurate and efficient. 
+interwhen is a test-time verification framework for language models that enforces correctness with respect to a set of verifiers. It is designed to improve *instance*-level reliability in reasoning systems, particularly in high-stakes domains where occasional errors are unacceptable.
 
-interwhen changes the inference pipeline of a language model by creating an auxiliary Monitor model that runs alongside the model and interacts with the model’s output to improve its quality. The Monitor agent reads the output of a language model in real time and calls necessary verifiers to check its validity. Based on the objectivity of a domain, verifiers can be symbolic, neuro-symbolic or even fully neural verifiers.
+While modern language models achieve high average performance, aggregate metrics obscure a critical limitation: even highly accurate systems may fail on individual instances. Such failures erode trust and limit deployment, while in domains such as law, healthcare and robotics, they undermine safety and can cause real harm. Ensuring correctness at the level of a single query remains an open challenge, especially in settings where formal task structure is limited or absent.
+
+interwhen addresses the problem by providing a plug-and-play mechanism to improve instance-level reliability of any language model, which we call *verifier-guided reasoning*. Instead of verifying only the final output, the framework enables verification of intermediate reasoning traces during generation. When a violation is detected, the system can steer, revise, or halt generation. If no output is produced, the system abstains; if an output is produced, it satisfies the specified verifiers.
+
+
+From a research perspective, interwhen introduces verifier compute as a new axis for test-time scaling and provides a testbed for verifier development. 
+
+**A New Axis for Test-Time Scaling**
+
+Introduces verifier compute as an additional dimension of scaling at inference time. Rather than scaling model size or sampling alone, performance can be improved by allocating compute to structured verification.
+
+**A Testbed for Verifier Development**
+Enables systematic evaluation of verifier designs at inference time before incorporating them into training objectives (e.g., as reward models or critics).
+
 
 A detailed discussion of interwhen, including how it was developed and tested, can be found in our paper at: [link]().
 
+## Key Features
+interwhen changes the inference pipeline of a language model by creating an auxiliary Monitor model that runs alongside the model and interacts with the model’s output to improve its quality. The Monitor agent reads the output of a language model in real time and calls necessary verifiers to check its validity. Based on the objectivity of a domain, verifiers can be symbolic, neuro-symbolic or even fully neural verifiers.
+
+1. **Verification During Generation**
+
+interwhen verifies reasoning traces as they are produced, without requiring external step extraction or structured decomposition. This allows the model to retain flexible reasoning strategies while remaining subject to correctness constraints.
+
+2. **Asynchronous and Efficient Execution**
+
+Verifiers are executed asynchronously and intervene only when violations are detected, minimizing inference overhead while preserving responsiveness.
+
+3. **Unified Model–Verifier Interface**
+
+The framework provides a general API for interaction between language models and verifiers, including neural, neurosymbolic, and symbolic components. Verifiers may operate on partial outputs or final answers. 
+
+
+## Verifier-guided Reasoning in Three Lines 
+Running verifier-guided inference requires only a few lines of code: just specify the list of monitors to be used with a target LLM. Each monitor requires specifying the kind of verifier, when it should be invoked (e.g., each step or after a reflection token like 'Wait'), and the text pattern to intervene with. 
+
+**Set up target LLM server**
+```bash
+python -m vllm.entrypoints.openai.api_server \
+  --model Qwen/Qwen3-30B-A3B-Thinking-2507 \
+  --max-model-len 65536 \
+  --port 8000 \
+  --tensor-parallel-size 8
+```
+
+**Generate answer enabled with given monitors**
+```python
+llm_server = init_llm_server("Qwen/Qwen3-30B-A3B-Thinking-2507", max_tokens=32768, port=8000)
+stream_completion(
+    prompt,
+    llm_server=llm_server,
+    monitors=(SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=True),),
+    async_execution=True
+)
+```
+The above code implements a simple monitor that replaces all occurences of "is" with "isn't".  You can run the full example here, `python ./examples/text_replacement_example.py`.
+
+<INSERT ANIMATIONS>
+----------------
+
+At a conceptual level, interwhen reframes reliability in language models:
+
+> Instead of asking whether a model is accurate on average, we ask whether a particular output satisfies explicit, verifiable constraints.
+
+By integrating verification directly into generation, interwhen provides a general mechanism for improving the soundness of reasoning systems without restricting model expressivity or requiring retraining.
 
 ## Installation
 
@@ -14,51 +75,35 @@ A detailed discussion of interwhen, including how it was developed and tested, c
 git clone https://github.com/microsoft/interwhen.git
 cd interwhen
 ```
+It is recommended to setup a fresh environment before installing the library.
 ## setup env
 ```bash
-conda env create -f environment.yml
-conda activate inter
 pip install -e .
 ```
 
-## Getting Started
-### Deploy the server
+## Quick Start Examples
 
-```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen3-30B-A3B-Thinking-2507 \
-  --max-model-len 65536 \
-  --port 8000 \
-  --tensor-parallel-size 8
-  ```
-
-## Quick Start
-
-### Simple text replacement example:
+### Simple text replacement monitor:
 
 ```bash
 python ./examples/text_replacement_example.py
 ```
 
-In the above script we call the function stream_completion, you can pass your own custom monitor that you would want to use to intervene
+### Test-time verification 
+We provide examples using three datasets: Maze, Game of 24, and SpatialMap. 
 
 ```bash
-stream_completion(
-    text,
-    llm_server=llm_server,
-    monitors=(SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=True),),
-    add_delay=False,
-    termination_requires_validation=False,
-    async_execution=True
-)
+python ./examples/TTSwithVerification/maze_example.py -n 1
+python ./examples/TTSwithVerification/game24_example.py -n 1
+python ./examples/TTSwithVerification/spatialmap_example.py -n 1
 ```
 
-You can change the monitors, which you can keep it custom. 
-See "interwhen/interwhen/monitors/base.py" for the abstract class of monitors
-
-## InBuilt Monitors
-
-### Early stopping Monitors:
+### Monitors for Early stopping
+```bash
+python ./examples/EarlyStopping/maze_example.py -n 1
+python ./examples/EarlyStopping/game24_example.py -n 1
+python ./examples/EarlyStopping/spatialmap_example.py -n 1
+```
 
 #### EAT (Entropy after </think>)
 ```bash
@@ -128,24 +173,6 @@ StepVerifierSpatialMapMonitor.from_prompt(
     max_corrections=args.max_corrections,
     name="spatialmap_step_verifier"
 )
-
-python ./examples/TTSwithVerification/spatialmap_stepverifier.py
-```
-
-## Examples
-
-Early stopping scripts
-```bash
-python ./examples/EarlyStopping/maze_example.py -n 1
-python ./examples/EarlyStopping/game24_example.py -n 1
-python ./examples/EarlyStopping/spatialmap_example.py -n 1
-```
-
-TTS scripts
-```bash
-python ./examples/TTSwithVerification/maze_example.py -n 1
-python ./examples/TTSwithVerification/game24_example.py -n 1
-python ./examples/TTSwithVerification/spatialmap_example.py -n 1
 ```
 
 ## Intended Uses
