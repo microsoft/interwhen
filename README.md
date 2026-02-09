@@ -53,99 +53,51 @@ stream_completion(
 )
 ```
 
-You can change the monitors, which you can keep it custom. 
-See "interwhen/interwhen/monitors/base.py" for the abstract class of monitors
+You can create your own custom monitors by subclassing `VerifyMonitor` in `interwhen/monitors/base.py`. A custom monitor requires implementing three methods:
+
+- **`step_extractor(chunk, generated_text)`** — Determines *when* to intervene by detecting meaningful reasoning steps in the model's streaming output. Returns a boolean indicating whether a new step has been identified and should be verified.
+- **`verify(chunk, token_index, event, event_info)`** — Checks the correctness of the extracted step using domain-specific logic (symbolic solvers, rule checks, etc.) and signals whether a correction is needed.
+- **`fix(generated_text, event_info)`** — Constructs the corrective feedback that is injected into the model's generation stream to steer it back on track.
 
 ## InBuilt Monitors
 
-### Early stopping Monitors:
+interwhen ships with two families of monitors:
 
-#### EAT (Entropy after </think>)
-```bash
-EATMonitor(
-    name="EAT_monitor",
-    model_name=earlystop_model,
-    alpha=0.2,
-    delta=0.0002,
-    min_steps=4,
-    answer_start_token="</think>",
-    async_execution=True
-)
-```
-#### DEER (Dynamic Early exit of reasoning models)
-```bash
-DEERMonitor(
-    name="DEER_monitor",
-    model_name=earlystop_model,
-    threshold=0.80,  # Example threshold for geometric mean confidence
-    answer_start_token="</think>",
-    async_execution=True
-)
-```
+### Early Stopping Monitors
 
-#### K stable answer monitors (Ours)
-```bash
-KstableAnswerMCQMonitor(
-    name="maze_kstable",
-    k=3,
-    options=options,  # Validate equations use exactly these numbers
-    answer_start_token="</think>"
-)
+Reduce inference cost by detecting when the model has reached sufficient confidence and terminating generation early.
 
-KstableAnswerGame24Monitor(
-    name="game24_kstable",
-    k=3,
-    expected_nums=nums,  # Validate equations use exactly these numbers
-    answer_start_token="</think>"
-)
-```
+| Monitor | Strategy | Key Parameter |
+|---------|----------|---------------|
+| **EAT** | Entropy variance of next-token drops below threshold | `delta` (EMA variance threshold) |
+| **DEER** | Geometric mean answer confidence exceeds threshold | `threshold` (confidence threshold) |
+| **KstableAnswerMCQMonitor** | Same MCQ answer appears `k` consecutive times | `k`, `options` |
+| **KstableAnswerGame24Monitor** | Same equation appears `k` consecutive times | `k`, `expected_nums` |
 
-### Test time Verification monitors:
+📖 **[Full documentation and parameter reference →](./examples/EarlyStopping/earlystopping.md)**
 
-```bash
-StepVerifierGame24Monitor(
-    name="game24_kstable",
-    answer_start_token = "</think>",
-    original_numbers=nums,  # Validate equations use exactly these numbers
-)
+### Test-Time Verification Monitors
 
-python ./examples/TTSwithVerification/game24_stepverifier.py
+Improve reasoning accuracy by verifying intermediate steps and injecting corrective feedback when errors are detected.
 
-StepVerifierMazeMonitor(
-    name="maze_step_verifier",
-    answer_start_token="</think>",
-    grid=grid,
-    start_pos=start_pos,
-    exit_pos=exit_pos,
-    max_corrections=args.max_corrections,
-    question_type=question_type,
-)
+| Monitor | Domain | Verifier |
+|---------|--------|----------|
+| **StepVerifierGame24Monitor** | Game of 24 | Arithmetic validation of each step's operation and remaining numbers |
+| **StepVerifierMazeMonitor** | Maze navigation | Grid-based verification of moves, turns, and position tracking |
+| **StepVerifierSpatialMapMonitor** | Spatial reasoning | Z3 constraint solver for directional relationship claims |
 
-python ./examples/TTSwithVerification/maze_stepverifier.py
-
-StepVerifierSpatialMapMonitor.from_prompt(
-    problem_text=user_prompt,
-    max_corrections=args.max_corrections,
-    name="spatialmap_step_verifier"
-)
-
-python ./examples/TTSwithVerification/spatialmap_stepverifier.py
-```
+📖 **[Full documentation and parameter reference →](./examples/TTSwithVerification/TTSwithverification.md)**
 
 ## Examples
 
 Early stopping scripts
 ```bash
-python ./examples/EarlyStopping/maze_example.py -n 1
-python ./examples/EarlyStopping/game24_example.py -n 1
-python ./examples/EarlyStopping/spatialmap_example.py -n 1
+python ./examples/EarlyStopping/[your_dataset]_example.py -n 1
 ```
 
-TTS scripts
+TTS with verification scripts
 ```bash
-python ./examples/TTSwithVerification/maze_example.py -n 1
-python ./examples/TTSwithVerification/game24_example.py -n 1
-python ./examples/TTSwithVerification/spatialmap_example.py -n 1
+python ./examples/TTSwithVerification/[your_dataset]_stepverifier.py -n 1
 ```
 
 ## Intended Uses
