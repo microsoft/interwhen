@@ -9,9 +9,9 @@ interwhen addresses the problem by providing a plug-and-play mechanism to improv
 
 From a research perspective, interwhen makes two contributions.
 
-**A New Axis for Test-Time Scaling**: Introduces verifier compute as an additional dimension of scaling at inference time. Rather than scaling model size or sampling alone, performance can be improved by allocating compute to structured verification.
+**A New Axis for Test-Time Scaling**. Introduces verifier compute as an additional dimension of scaling at inference time. Rather than scaling model size or sampling alone, performance can be improved by allocating compute to structured verification.
 
-**A Testbed for Verifier Development**: Enables systematic evaluation of verifier designs at inference time before incorporating them into training objectives (e.g., as reward models or critics).
+**A Testbed for Verifier Development**. Enables systematic evaluation of verifier designs at inference time before incorporating them into training objectives (e.g., as reward models or critics).
 
 
 A detailed discussion of interwhen, including how it was developed and tested, can be found in our [paper]().
@@ -19,11 +19,11 @@ A detailed discussion of interwhen, including how it was developed and tested, c
 ## Key Features
 interwhen changes the inference pipeline of a language model by creating an auxiliary Monitor model that runs alongside the model and interacts with the model’s output to improve its quality. The Monitor agent reads the output of a language model in real time and calls necessary verifiers to check its validity. 
 
-1. **Verification During Generation**: interwhen verifies reasoning traces as they are produced, without requiring external step extraction or structured decomposition. This allows the model to retain flexible reasoning strategies while remaining subject to correctness constraints.
+1. **Verification During Generation**. interwhen verifies reasoning traces as they are produced, without requiring external step extraction or structured decomposition. This allows the model to retain flexible reasoning strategies while remaining subject to correctness constraints.
 
-2. **Asynchronous and Efficient Execution**: Verifiers are executed asynchronously and intervene only when violations are detected, minimizing inference overhead while preserving responsiveness.
+2. **Asynchronous and Efficient Execution**. Verifiers are executed asynchronously and intervene only when violations are detected, minimizing inference overhead while preserving responsiveness.
 
-3. **Unified Model–Verifier Interface**: The framework provides a general API for interaction between language models and different kind of verifiers. Based on the objectivity of a domain, verifiers can be symbolic, neuro-symbolic or even fully neural verifiers. They can operate on partial outputs,  final answers, or both. 
+3. **Unified Model–Verifier Interface**. The framework provides a general API for interaction between language models and different kind of verifiers. Based on the objectivity of a domain, verifiers can be symbolic, neuro-symbolic or even fully neural verifiers. They can operate on partial outputs,  final answers, or both. 
 
 ----------------
 
