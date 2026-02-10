@@ -65,7 +65,11 @@ python ./examples/TTSwithVerification/maze_stepverifier.py).
 ```
 
 This is the visualization of the verification running to solve the Maze problem.
+
+
 https://github.com/user-attachments/assets/307a48e8-b139-420c-94f7-07c43bb85806
+
+
 
 ## Installation
 
