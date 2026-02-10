@@ -51,27 +51,21 @@ llm_server = init_llm_server("Qwen/Qwen3-30B-A3B-Thinking-2507", max_tokens=3276
 stream_completion(
     prompt,
     llm_server=llm_server,
-    monitors=(SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=True),),
+    monitors=(monitor = StepVerifierMazeMonitor.from_prompt(
+                  prompt_text=user_prompt,
+                  max_corrections=5,
+                  name="maze_step_verifier"),
+    ),
     async_execution=True
 )
 ```
-The above code implements a simple monitor that watches the model's output stream and replaces all occurences of "is" with "isn't". It can be replaced with your custom monitor, e.g., for checking logical correctness or domain-specific constraints.  You can run the full example [here](python ./examples/text_replacement_example.py).
+The above monitor is for Maze dataset, where a maze is given and questions are asked with respect to the maze. We use metaprompting to get the output in the required format that can be parsed by the verifier. The above code implements a simple monitor that watches the model's output stream and verifies if the step proposed by the model is valid or not. You can run the full example:
+```bash
+python ./examples/TTSwithVerification/maze_stepverifier.py).
+```
 
-
-
-https://github.com/user-attachments/assets/a90a829d-99a4-4640-9e00-6c9511c64fa1
-
-
-
-The table below shows the latency impact of the monitor. When the stream contains the target word ("is"), the monitor activates and performs the replacement, adding some overhead. When the target word is absent, the monitor has negligible impact on latency.
-
-| Stream content | Monitor | Latency (s) |
-|----------------|---------|-------------|
-| Contains "is" (monitor activates) | enabled | 12.97 ± 2.97 |
-| Contains "is" (monitor activates) | disabled | 8.36 ± 0.01 |
-| Does not contain "is" (monitor idle) | enabled | 7.31 ± 1.16 |
-| Does not contain "is" (monitor idle) | disabled | 7.35 ± 1.17 |
-
+This is the visualization of the verification running to solve the Maze problem.
+https://github.com/user-attachments/assets/307a48e8-b139-420c-94f7-07c43bb85806
 
 ## Installation
 
