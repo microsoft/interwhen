@@ -14,7 +14,7 @@ From a research perspective, interwhen makes two contributions.
 **A Testbed for Verifier Development**. Enables systematic evaluation of verifier designs at inference time before incorporating them into training objectives (e.g., as reward models or critics).
 
 
-A detailed discussion of interwhen, including how it was developed and tested, can be found in our [paper](https://www.microsoft.com/en-us/research/publication/interwhen-a-generalizable-framework-for-verifiable-reasoning-with-test-time-monitors/).
+A detailed discussion of interwhen, including how it was developed and tested, can be found in our [paper](https://arxiv.org/abs/2602.11202).
 
 ## Key Features
 interwhen changes the inference pipeline of a language model by creating an auxiliary Monitor model that runs alongside the model and interacts with the model’s output to improve its quality. The Monitor agent reads the output of a language model in real time and calls necessary verifiers to check its validity. 
