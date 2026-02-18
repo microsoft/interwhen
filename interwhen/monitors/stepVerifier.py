@@ -11,6 +11,7 @@ from ..utils.spatialmap_verifier import (
     SpatialMapZ3Solver, parse_directional_claims_from_text,
     extract_step2_claims, verify_spatialmap_step, format_spatialmap_feedback
 )
+import asyncio
 
     
 class StepVerifierGame24Monitor(VerifyMonitor):
@@ -26,6 +27,8 @@ class StepVerifierGame24Monitor(VerifyMonitor):
         self.answer_start_token = answer_start_token
         self.original_numbers = [float(x) for x in original_numbers]
         self.max_corrections = max_corrections
+        # Instantiate Lock for safer async execution
+        self.lock = asyncio.Lock()
 
     def _count_feedback_blocks(self, text):
         """Count how many [VERIFIER FEEDBACK...] blocks are in the text."""
@@ -173,13 +176,14 @@ class StepVerifierGame24Monitor(VerifyMonitor):
         num_corrections = self._count_feedback_blocks(chunk)
         if num_corrections >= self.max_corrections:
             max_feedback = "\nthe answer is \\boxed{no solution}"
-            if not event.is_set():
-                event_info["generated_text"] = chunk
-                event_info["feedback"] = max_feedback
-                event_info["correction_index"] = token_index
-                event_info["errors"] = ["Max corrections reached"]
-                event_info["failed_step"] = None
-                event.set()
+            async with self.lock:
+                if not event.is_set():
+                    event_info["generated_text"] = chunk
+                    event_info["feedback"] = max_feedback
+                    event_info["correction_index"] = token_index
+                    event_info["errors"] = ["Max corrections reached"]
+                    event_info["failed_step"] = None
+                    event.set()
             
             return chunk, max_feedback
         
@@ -205,14 +209,14 @@ class StepVerifierGame24Monitor(VerifyMonitor):
         
         # Step has errors - generate feedback
         feedback = format_feedback(errors, step_num, current_available)
-        
-        if not event.is_set():
-            event_info["generated_text"] = chunk
-            event_info["feedback"] = feedback
-            event_info["correction_index"] = token_index
-            event_info["errors"] = errors
-            event_info["failed_step"] = step_num
-            event.set()
+        async with self.lock:
+            if not event.is_set():
+                event_info["generated_text"] = chunk
+                event_info["feedback"] = feedback
+                event_info["correction_index"] = token_index
+                event_info["errors"] = errors
+                event_info["failed_step"] = step_num
+                event.set()
         
         return chunk, feedback
 
@@ -305,6 +309,8 @@ class StepVerifierMazeMonitor(VerifyMonitor):
         self.exit_pos = exit_pos
         self.max_corrections = max_corrections
         self.question_type = question_type
+        # Instantiate Lock for safer async execution
+        self.lock = asyncio.Lock()
 
     @staticmethod
     def detect_question_type(prompt: str) -> str:
@@ -540,13 +546,14 @@ class StepVerifierMazeMonitor(VerifyMonitor):
         num_corrections = self._count_feedback_blocks(chunk)
         if num_corrections >= self.max_corrections:
             max_feedback = "\nthe answer is \\boxed{no solution}"
-            if not event.is_set():
-                event_info["generated_text"] = chunk
-                event_info["feedback"] = max_feedback
-                event_info["correction_index"] = token_index
-                event_info["errors"] = ["Max corrections reached"]
-                event_info["failed_step"] = None
-                event.set()
+            async with self.lock:
+                if not event.is_set():
+                    event_info["generated_text"] = chunk
+                    event_info["feedback"] = max_feedback
+                    event_info["correction_index"] = token_index
+                    event_info["errors"] = ["Max corrections reached"]
+                    event_info["failed_step"] = None
+                    event.set()
             
             return chunk, max_feedback
         
@@ -563,13 +570,14 @@ class StepVerifierMazeMonitor(VerifyMonitor):
             locate_valid, locate_errors, locate_found = self._check_locate_section(chunk)
             if locate_found and not locate_valid:
                 feedback = format_locate_feedback(locate_errors)
-                if not event.is_set():
-                    event_info["generated_text"] = chunk
-                    event_info["feedback"] = feedback
-                    event_info["correction_index"] = token_index
-                    event_info["errors"] = locate_errors
-                    event_info["failed_step"] = 0  # LOCATE section
-                    event.set()
+                async with self.lock:
+                    if not event.is_set():
+                        event_info["generated_text"] = chunk
+                        event_info["feedback"] = feedback
+                        event_info["correction_index"] = token_index
+                        event_info["errors"] = locate_errors
+                        event_info["failed_step"] = 0  # LOCATE section
+                        event.set()
                 return chunk, feedback
             return chunk, None
         
@@ -593,13 +601,14 @@ class StepVerifierMazeMonitor(VerifyMonitor):
         # Step has errors - generate feedback
         feedback = format_maze_feedback(errors, step_num)
         
-        if not event.is_set():
-            event_info["generated_text"] = chunk
-            event_info["feedback"] = feedback
-            event_info["correction_index"] = token_index
-            event_info["errors"] = errors
-            event_info["failed_step"] = step_num
-            event.set()
+        async with self.lock:
+            if not event.is_set():
+                event_info["generated_text"] = chunk
+                event_info["feedback"] = feedback
+                event_info["correction_index"] = token_index
+                event_info["errors"] = errors
+                event_info["failed_step"] = step_num
+                event.set()
         
         return chunk, feedback
 
@@ -620,13 +629,14 @@ class StepVerifierMazeMonitor(VerifyMonitor):
         locate_valid, locate_errors, locate_found = self._check_locate_section(chunk)
         if locate_found and not locate_valid:
             feedback = format_locate_feedback(locate_errors)
-            if not event.is_set():
-                event_info["generated_text"] = chunk
-                event_info["feedback"] = feedback
-                event_info["correction_index"] = token_index
-                event_info["errors"] = locate_errors
-                event_info["failed_step"] = 0
-                event.set()
+            async with self.lock:
+                if not event.is_set():
+                    event_info["generated_text"] = chunk
+                    event_info["feedback"] = feedback
+                    event_info["correction_index"] = token_index
+                    event_info["errors"] = locate_errors
+                    event_info["failed_step"] = 0
+                    event.set()
             return chunk, feedback
         
         # For relative_position, we don't verify the final Yes/No answer
@@ -811,6 +821,9 @@ class StepVerifierSpatialMapMonitor(VerifyMonitor):
         
         # Track verified claims to avoid re-checking
         self.verified_claims: Set[Tuple[str, str, str]] = set()
+
+        # Instantiate Lock for safer async execution
+        self.lock = asyncio.Lock()
     
     @classmethod
     def from_prompt(
@@ -866,6 +879,7 @@ class StepVerifierSpatialMapMonitor(VerifyMonitor):
         
         # Filter to only new claims (not yet verified)
         new_claims = []
+
         for claim in all_claims:
             claim_key = (claim['A'], claim['direction'], claim['B'])
             if claim_key not in self.verified_claims:
@@ -890,13 +904,14 @@ class StepVerifierSpatialMapMonitor(VerifyMonitor):
         num_corrections = self._count_feedback_blocks(chunk)
         if num_corrections >= self.max_corrections:
             max_feedback = "\nthe answer is \\boxed{no solution}"
-            if not event.is_set():
-                event_info["generated_text"] = chunk
-                event_info["feedback"] = max_feedback
-                event_info["correction_index"] = token_index
-                event_info["errors"] = ["Max corrections reached"]
-                event_info["failed_step"] = None
-                event.set()
+            async with self.lock:
+                if not event.is_set():
+                    event_info["generated_text"] = chunk
+                    event_info["feedback"] = max_feedback
+                    event_info["correction_index"] = token_index
+                    event_info["errors"] = ["Max corrections reached"]
+                    event_info["failed_step"] = None
+                    event.set()
             return chunk, max_feedback
         
         # Extract new claims to verify
@@ -913,19 +928,21 @@ class StepVerifierSpatialMapMonitor(VerifyMonitor):
             )
             
             # Mark as verified (whether valid or not)
-            self.verified_claims.add(claim_key)
+            async with self.lock:
+                self.verified_claims.add(claim_key)
             
             if not is_valid:
                 # Contradiction found - generate feedback
                 feedback = format_spatialmap_feedback(errors, claim)
                 
-                if not event.is_set():
-                    event_info["generated_text"] = chunk
-                    event_info["feedback"] = feedback
-                    event_info["correction_index"] = token_index
-                    event_info["errors"] = errors
-                    event_info["failed_step"] = claim
-                    event.set()
+                async with self.lock:
+                    if not event.is_set():
+                        event_info["generated_text"] = chunk
+                        event_info["feedback"] = feedback
+                        event_info["correction_index"] = token_index
+                        event_info["errors"] = errors
+                        event_info["failed_step"] = claim
+                        event.set()
                 
                 return chunk, feedback
         
