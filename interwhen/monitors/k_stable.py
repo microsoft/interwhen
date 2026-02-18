@@ -1,5 +1,6 @@
 import re
 from .base import VerifyMonitor
+import asyncio
 
 NEGATION_WORDS = ["not", "isn't", "isnt", "no ", "cannot", "can't", "cant",
                   "doesn't", "doesnt", "never"]
@@ -26,6 +27,8 @@ class KstableAnswerMCQMonitor(VerifyMonitor):
         self.options = options
         self.answer_start_token = answer_start_token
         self.stabilized_answer = None
+        # Instantiate Lock for safer async execution
+        self.lock = asyncio.Lock()
 
     def _contains_negation(self, text: str) -> bool:
         """Check if text contains negation words indicating uncertainty."""
@@ -198,11 +201,12 @@ class KstableAnswerMCQMonitor(VerifyMonitor):
         if is_valid:
             return step, None
         
-        if not event.is_set():
-            event_info["generated_text"] = step
-            event_info["feedback"] = "</think>"  # Sliced text up to k-stable point
-            event_info["correction_index"] = correction_index
-            event.set()
+        async with self.lock:
+            if not event.is_set():
+                event_info["generated_text"] = step
+                event_info["feedback"] = "</think>"  # Sliced text up to k-stable point
+                event_info["correction_index"] = correction_index
+                event.set()
     
     async def fix(self, generated_text, event_info, fix_method=None):
         """Return the sliced text up to the k-stable point."""
@@ -257,6 +261,8 @@ class KstableAnswerGame24Monitor(VerifyMonitor):
         self.expected_nums = expected_nums
         self.answer_start_token = answer_start_token
         self.stabilized_equation = None
+        # Instantiate Lock for safer async execution
+        self.lock = asyncio.Lock()
 
     def _extract_numbers_from_expr(self, expr):
         """Extract all numbers (including decimals) from an expression."""
@@ -439,11 +445,12 @@ class KstableAnswerGame24Monitor(VerifyMonitor):
         if is_valid:
             return chunk, None
         
-        if not event.is_set():
-            event_info["generated_text"] = chunk
-            event_info["feedback"] = "</think>"
-            event_info["correction_index"] = correction_index
-            event.set()
+        async with self.lock:
+            if not event.is_set():
+                event_info["generated_text"] = chunk
+                event_info["feedback"] = "</think>"
+                event_info["correction_index"] = correction_index
+                event.set()
     
     async def fix(self, generated_text, event_info, fix_method=None):
         """Return the sliced text up to the k-stable point."""
