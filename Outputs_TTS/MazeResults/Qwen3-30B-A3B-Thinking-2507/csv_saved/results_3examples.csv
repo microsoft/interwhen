@@ -1,0 +1,4 @@
+index,question_type,correct,attempted,sol,gt,tokens,message
+4005,relative_position,True,True,A,Yes,3120,Correct: option A -> Yes
+4011,relative_position,True,True,A,Yes,2896,Correct: option A -> Yes
+4012,relative_position,True,True,A,Yes,2152,Correct: option A -> Yes

@@ -1,0 +1,6 @@
+index,question_type,correct,attempted,sol,gt,tokens,num_relations,verified_claims,message
+0,direction,True,True,A,Northeast,3503,9,1,Correct: option A -> Northeast
+374,direction,True,True,A,Southeast,4142,9,1,Correct: option A -> Southeast
+749,object,True,True,D,Miniature Golf Mart,6550,9,11,Correct: option D -> Miniature Golf Mart
+1124,counting,True,True,A,0,8820,9,0,Correct: option A -> 0
+1499,counting,False,True,C,0,6193,9,0,"Incorrect: expected '0', got '3' (option C)"

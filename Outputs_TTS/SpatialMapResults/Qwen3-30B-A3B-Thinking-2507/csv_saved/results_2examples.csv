@@ -1,0 +1,3 @@
+index,question_type,correct,attempted,sol,gt,tokens,num_relations,verified_claims,message
+0,direction,True,True,A,Northeast,4736,9,11,Correct: option A -> Northeast
+1499,counting,False,True,C,0,8799,9,17,"Incorrect: expected '0', got '3' (option C)"

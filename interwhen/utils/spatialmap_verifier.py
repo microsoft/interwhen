@@ -185,15 +185,32 @@ def parse_directional_claims_from_text(text: str) -> List[Dict]:
     - "X is to the northwest of Y"
     - "X is NORTHWEST of Y"
     - "X is northwest of Y" (affirmative claims)
+    - "X is NW of Y" (abbreviated directions)
+    - "[X] is to the northwest of [Y]" (bracket-wrapped names)
     
     Returns list of IR dicts: [{"A": ..., "direction": ..., "B": ...}, ...]
     """
+    # Expand abbreviated directions before parsing
+    abbrev_map = {
+        'NW': 'northwest', 'NE': 'northeast',
+        'SW': 'southwest', 'SE': 'southeast',
+    }
+    expanded_text = text
+    for abbr, full in abbrev_map.items():
+        # Replace standalone abbreviations like "is NE of" → "is northeast of"
+        expanded_text = re.sub(
+            rf'\b{abbr}\b(?=\s+of\b)', full, expanded_text
+        )
+
+    # Strip square brackets around entity names: [Foo Bar] → Foo Bar
+    expanded_text = re.sub(r'\[([A-Z][A-Za-z\'\s]*?)\]', r'\1', expanded_text)
+
     claims = []
     
     # Pattern: "X is (to the) DIRECTION of Y"
     pattern = r"([A-Z][A-Za-z'][A-Za-z'\s]*?)\s+is\s+(?:to\s+the\s+)?(northwest|northeast|southwest|southeast|north|south|east|west)\s+of\s+([A-Z][A-Za-z'][A-Za-z'\s]*?)(?:\.|,|\s*[→✓✗]|\s*$|\s+(?:and|so|which|therefore|thus|but|\())"
     
-    matches = re.finditer(pattern, text, re.IGNORECASE)
+    matches = re.finditer(pattern, expanded_text, re.IGNORECASE)
     
     for match in matches:
         entity_a = match.group(1).strip()
@@ -209,7 +226,7 @@ def parse_directional_claims_from_text(text: str) -> List[Dict]:
                       'which', 'what', 'where', 'when', 'also', 'not', 'the', 'a', 'an'}
         if entity_a.lower() in skip_words or entity_b.lower() in skip_words:
             continue
-        if len(entity_a) < 3 or len(entity_b) < 3:
+        if len(entity_a) < 2 or len(entity_b) < 2:
             continue
         if not entity_a[0].isupper():
             continue

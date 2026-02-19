@@ -1,0 +1,49 @@
+{
+  "model": "Qwen/Qwen3-30B-A3B-Thinking-2507",
+  "total_examples": 2,
+  "correct": 1,
+  "attempted": 2,
+  "accuracy": 0.5,
+  "soundness": 0.5,
+  "total_reasoning_tokens": 13535,
+  "avg_reasoning_tokens": 6767.5,
+  "max_corrections": 3,
+  "stats_by_type": {
+    "direction": {
+      "total": 1,
+      "correct": 1
+    },
+    "object": {
+      "total": 0,
+      "correct": 0
+    },
+    "counting": {
+      "total": 1,
+      "correct": 0
+    }
+  },
+  "results": [
+    {
+      "idx": 0,
+      "question_type": "direction",
+      "correct": true,
+      "attempted": true,
+      "sol": "A",
+      "gt": "Northeast",
+      "reasoning_tokens": 4736,
+      "num_relations": 9,
+      "verified_claims": 11
+    },
+    {
+      "idx": 1499,
+      "question_type": "counting",
+      "correct": false,
+      "attempted": true,
+      "sol": "C",
+      "gt": "0",
+      "reasoning_tokens": 8799,
+      "num_relations": 9,
+      "verified_claims": 17
+    }
+  ]
+}

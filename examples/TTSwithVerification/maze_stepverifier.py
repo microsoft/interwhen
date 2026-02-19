@@ -92,20 +92,20 @@ def count_tokens(text: str, tokenizer) -> int:
     return len(tokens)
 
 
-def get_question_type_from_index(idx: int) -> str:
-    """Determine question type based on index range.
+# def get_question_type_from_index(idx: int) -> str:
+#     """Determine question type based on index range.
     
-    Dataset structure:
-    - 3000-3499: right turns
-    - 3500-3999: total turns
-    - 4000-4500: relative position
-    """
-    if idx < 3500:
-        return "right_turns"
-    elif idx < 4000:
-        return "total_turns"
-    else:
-        return "relative_position"
+#     Dataset structure:
+#     - 3000-3499: right turns
+#     - 3500-3999: total turns
+#     - 4000-4500: relative position
+#     """
+#     if idx < 3500:
+#         return "right_turns"
+#     elif idx < 4000:
+#         return "total_turns"
+#     else:
+#         return "relative_position"
 
 
 def init_llm_server(model_name, max_tokens=32768, port=8000):

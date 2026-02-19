@@ -1,0 +1,11 @@
+index,question_type,correct,attempted,sol,gt,tokens,message
+4005,relative_position,False,False,no solution,Yes,5003,Solution 'no solution' not found in options or ground truth
+4007,relative_position,True,True,A,Yes,4281,Correct: option A -> Yes
+4011,relative_position,False,False,no solution,Yes,4267,Solution 'no solution' not found in options or ground truth
+4012,relative_position,False,False,no solution,Yes,3826,Solution 'no solution' not found in options or ground truth
+4014,relative_position,True,True,A,Yes,5200,Correct: option A -> Yes
+3016,right_turns,True,True,B,0,6811,Correct: option B -> 0
+3017,right_turns,True,True,A,1,8752,Correct: option A -> 1
+3047,right_turns,True,True,C,2,6261,Correct: option C -> 2
+3013,right_turns,True,True,A,0,15431,Correct: option A -> 0
+3036,right_turns,True,True,B,0,6211,Correct: option B -> 0

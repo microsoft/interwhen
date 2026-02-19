@@ -1,11 +1,15 @@
 """
-SpatialMap experiment with step-by-step verification using StepVerifierSpatialMapMonitor.
+SpatialMap experiment with thinking-phase step verification.
 
-Uses the new monitor-based architecture that integrates with stream_completion.
+Uses ThinkingPhaseStepVerifierSpatialMapMonitor which:
+  - Verifies the model's directional claims during <think> via side-streams
+  - Injects a structured step format after </think> (no meta-prompt needed)
+  - Verifies each step as the model fills in the structured template
 """
 
 import argparse
 import asyncio
+import csv
 import json
 import logging
 import os
@@ -17,7 +21,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 
 from interwhen import stream_completion
-from interwhen.monitors import StepVerifierSpatialMapMonitor
+from interwhen.monitors import ThinkingPhaseStepVerifierSpatialMapMonitor
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
@@ -42,17 +46,13 @@ def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/SpatialM
     dirs = {
         "base": output_base,
         "reasoning": os.path.join(output_base, "Reasoning_output"),
+        "csv_saved": os.path.join(output_base, "csv_saved"),
     }
     
     for dir_path in dirs.values():
         os.makedirs(dir_path, exist_ok=True)
     
     return dirs
-
-
-def remove_last_paragraph(s: str) -> str:
-    """Remove the last instruction paragraph from the prompt."""
-    return s[:-143] if len(s) > 143 else s
 
 
 def get_question_type(idx: int) -> str:
@@ -71,174 +71,16 @@ def get_question_type(idx: int) -> str:
         return "counting"
 
 
-def build_meta_prompt_from_example(example):
-    """Build prompt with structured output format instructions."""
-    
-    # Get the description
-    description = example.get("prompt")
-    description = str(description)
-    description = remove_last_paragraph(description)
-    
-    pre_prompt = """You are a spatial reasoning expert. Given a description of objects on a map and their relative positions, analyze the spatial relationships step by step.
+def build_simple_prompt(example):
+    """Build a simple user prompt from the spatial map example.
 
-CRITICAL INSTRUCTION: DO NOT use abbreviations or initials for entity names. Always use the COMPLETE FULL NAME of each entity exactly as given in the problem. For example, write "Police Supply Store" not "PSS" or "PS".
-
-DIRECTION DEFINITIONS (Diagonal Directions):
-- Northwest = up and to the left (row decreases, col decreases)
-- Northeast = up and to the right (row decreases, col increases)  
-- Southwest = down and to the left (row increases, col decreases)
-- Southeast = down and to the right (row increases, col increases)
-
-CARDINAL DIRECTIONS (for questions asking about North/South/East/West):
-- North = directly up - requires BOTH Northwest AND Northeast relationships to be confirmed
-- South = directly down - requires BOTH Southwest AND Southeast relationships to be confirmed
-- West = directly left - requires BOTH Northwest AND Southwest relationships to be confirmed
-- East = directly right - requires BOTH Northeast AND Southeast relationships to be confirmed
-
-IMPORTANT: In this dataset, only diagonal relationships (NW/NE/SW/SE) are given. An object can ONLY be in a pure cardinal direction (N/S/E/W) if BOTH required diagonal relationships exist.
-
-IMPORTANT RULES:
-- Directions are TRANSITIVE: If A is Northwest of B, and B is Northwest of C, then A is Northwest of C.
-- Directions are REVERSIBLE: If A is Northwest of B, then B is Southeast of A.
-- Opposite pairs: Northwest ↔ Southeast, Northeast ↔ Southwest
-
-STRUCTURED OUTPUT FORMAT:
-
-═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 1: Direction Finding (Q0)
-═══════════════════════════════════════════════════════════════════════════════
-
-Map Description:
-Police Supply Store is in the map. Narwhal's Novelties is to the Northwest of Police Supply Store. Coral Crafts is to the Northwest of Narwhal's Novelties. Coral Crafts is to the Northwest of Police Supply Store. Planetarium Prints is to the Southeast of Coral Crafts. Planetarium Prints is to the Northeast of Police Supply Store. Oz Oddities is to the Southwest of Planetarium Prints. Oz Oddities is to the Southwest of Police Supply Store. Ice Queen Ice Cream is to the Northwest of Planetarium Prints. Ice Queen Ice Cream is to the Southeast of Coral Crafts.
-
-Question: In which direction is Planetarium Prints relative to Police Supply Store?
-
-### Final Answer
-
->>> STEP 1: PARSE RELATIONSHIPS
-    - Narwhal's Novelties is to the Northwest of Police Supply Store
-    - Coral Crafts is to the Northwest of Narwhal's Novelties
-    - Coral Crafts is to the Northwest of Police Supply Store
-    - Planetarium Prints is to the Southeast of Coral Crafts
-    - Planetarium Prints is to the Northeast of Police Supply Store
-    - Oz Oddities is to the Southwest of Planetarium Prints
-    - Oz Oddities is to the Southwest of Police Supply Store
-    - Ice Queen Ice Cream is to the Northwest of Planetarium Prints
-    - Ice Queen Ice Cream is to the Southeast of Coral Crafts
-
->>> STEP 2: FIND DIRECT RELATIONSHIP
-    - Looking for: Planetarium Prints relative to Police Supply Store
-    - Direct relationship found: "Planetarium Prints is to the Northeast of Police Supply Store"
-
->>> STEP 3: ANSWER
-    - Planetarium Prints is to the NORTHEAST of Police Supply Store.
-    
->>> FINAL ANSWER: Northeast
-    \\boxed{A}
-
-═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 2: Object Finding (Q1)
-═══════════════════════════════════════════════════════════════════════════════
-
-Map Description:
-Quail's Quilts is in the map. Olive's Oils is to the Southeast of Quail's Quilts. Lumber's Marketplace is to the Northeast of Olive's Oils. Lumber's Marketplace is to the Northeast of Quail's Quilts. Stingray Shoes is to the Northeast of Quail's Quilts. Stingray Shoes is to the Northwest of Lumber's Marketplace. Elephant's Electronics is to the Northeast of Olive's Oils. Elephant's Electronics is to the Northeast of Lumber's Marketplace. Blossom Boutique is to the Northwest of Elephant's Electronics. Blossom Boutique is to the Southeast of Stingray Shoes.
-
-Question: Which object is in the Southwest of Lumber's Marketplace?
-
-### Final Answer
-
->>> STEP 1: PARSE RELATIONSHIPS
-    - Olive's Oils is to the Southeast of Quail's Quilts
-    - Lumber's Marketplace is to the Northeast of Olive's Oils
-    - Lumber's Marketplace is to the Northeast of Quail's Quilts
-    - Stingray Shoes is to the Northeast of Quail's Quilts
-    - Stingray Shoes is to the Northwest of Lumber's Marketplace
-    - Elephant's Electronics is to the Northeast of Olive's Oils
-    - Elephant's Electronics is to the Northeast of Lumber's Marketplace
-    - Blossom Boutique is to the Northwest of Elephant's Electronics
-    - Blossom Boutique is to the Southeast of Stingray Shoes
-
->>> STEP 2: FIND OBJECTS IN SOUTHWEST OF Lumber's Marketplace
-    - Using reversibility: if Lumber's Marketplace is to the Northeast of X, then X is to the Southwest of Lumber's Marketplace.
-    - Scanning relationships for "Lumber's Marketplace is to the Northeast of X":
-    - "Lumber's Marketplace is to the Northeast of Olive's Oils" → Olive's Oils is SOUTHWEST of Lumber's Marketplace ✓
-    - "Lumber's Marketplace is to the Northeast of Quail's Quilts" → Quail's Quilts is SOUTHWEST of Lumber's Marketplace ✓
-    - Other objects:
-    - Stingray Shoes is Northwest of Lumber's Marketplace → NOT Southwest
-    - Elephant's Electronics is Northeast of Lumber's Marketplace → NOT Southwest
-    - Blossom Boutique: no direct relationship to Lumber's Marketplace given
-    - Objects in Southwest of Lumber's Marketplace: Olive's Oils, Quail's Quilts
-    - Checking options: Quail's Quilts matches option D.
-
->>> STEP 3: ANSWER
-    - Quail's Quilts is in the Southwest of Lumber's Marketplace.
-    
->>> FINAL ANSWER: Quail's Quilts
-    \\boxed{D}
-
-═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 3: Counting (Q2)
-═══════════════════════════════════════════════════════════════════════════════
-
-Map Description:
-Tremor Toys is in the map. Fresh Foods is to the Northeast of Tremor Toys. Salmon Sushi is to the Northeast of Fresh Foods. Salmon Sushi is to the Northeast of Tremor Toys. Recycle Center is to the Northeast of Fresh Foods. Recycle Center is to the Southeast of Salmon Sushi. Wolf's Wardrobe is to the Southeast of Fresh Foods. Wolf's Wardrobe is to the Southeast of Tremor Toys. Mantis's Maps is to the Southeast of Salmon Sushi. Mantis's Maps is to the Southeast of Fresh Foods.
-
-Question: How many objects are in the Southwest of Mantis's Maps?
-
-### Final Answer
-
->>> STEP 1: PARSE RELATIONSHIPS
-    - Fresh Foods is to the Northeast of Tremor Toys
-    - Salmon Sushi is to the Northeast of Fresh Foods
-    - Salmon Sushi is to the Northeast of Tremor Toys
-    - Recycle Center is to the Northeast of Fresh Foods
-    - Recycle Center is to the Southeast of Salmon Sushi
-    - Wolf's Wardrobe is to the Southeast of Fresh Foods
-    - Wolf's Wardrobe is to the Southeast of Tremor Toys
-    - Mantis's Maps is to the Southeast of Salmon Sushi
-    - Mantis's Maps is to the Southeast of Fresh Foods
-
->>> STEP 2: COUNT OBJECTS IN SOUTHWEST OF Mantis's Maps
-    - Using reversibility: if Mantis's Maps is to the Southeast of X, then X is to the Northwest of Mantis's Maps (NOT Southwest!).
-    - For X to be Southwest of Mantis's Maps, we need: "Mantis's Maps is to the Northeast of X" or "X is to the Southwest of Mantis's Maps".
-    - Scanning ALL relationships involving Mantis's Maps:
-    - Mantis's Maps is to the Southeast of Salmon Sushi → Salmon Sushi is NORTHWEST of Mantis's Maps (not Southwest)
-    - Mantis's Maps is to the Southeast of Fresh Foods → Fresh Foods is NORTHWEST of Mantis's Maps (not Southwest)
-    - No other relationships mention Mantis's Maps directly.
-    - Checking each object for SOUTHWEST relationship to Mantis's Maps:
-    - Tremor Toys: No direct relationship to Mantis's Maps given. Cannot determine.
-    - Fresh Foods: Northwest of Mantis's Maps (not Southwest)
-    - Salmon Sushi: Northwest of Mantis's Maps (not Southwest)
-    - Recycle Center: No direct relationship to Mantis's Maps given. Cannot determine.
-    - Wolf's Wardrobe: No direct relationship to Mantis's Maps given. Cannot determine.
-    - Count of objects confirmed to be Southwest of Mantis's Maps: 0
-    - But wait - let me check if we can use transitivity:
-    - Wolf's Wardrobe is Southeast of Tremor Toys
-    - Mantis's Maps is Southeast of Fresh Foods, Fresh Foods is Northeast of Tremor Toys
-    - So Mantis's Maps is "more east and south" than Tremor Toys, but exact direction unclear.
-    - Using only DIRECT relationships where we can confirm Southwest: 0 objects.
-    - Checking the options: If 0 is not available, we need to reconsider.
-    - Options available: A. 5, B. 3, C. 2, D. 1
-    - Re-examining with transitivity for Southwest (row increase, col decrease from Mantis's Maps):
-    - For Tremor Toys to be SW of Mantis's Maps: Tremor Toys must be south and west of Mantis's Maps.
-    - Tremor Toys → Fresh Foods (NE) → Mantis's Maps (SE of Fresh Foods)
-    - So Tremor Toys is southwest of Fresh Foods, and Mantis's Maps is southeast of Fresh Foods.
-    - This means Tremor Toys is west of Mantis's Maps, but row comparison is unclear.
-    - Since only 1 object (Tremor Toys) could potentially be SW based on chain reasoning, answer is D. 1.
-
->>> STEP 3: ANSWER
-    - There is 1 object in the Southwest of Mantis's Maps.
-    
->>> FINAL ANSWER: 1
-    \\boxed{D}
-
-═══════════════════════════════════════════════════════════════════════════════
-
-REMINDER: Use the COMPLETE FULL NAME of each entity. DO NOT abbreviate or use initials.
-
-Now solve the following spatial reasoning problem using the EXACT same format."""
-    
-    return pre_prompt, description
+    No system / meta prompt is used — the structured step format is
+    injected by the monitor after ``</think>``.
+    """
+    description = str(example.get("prompt", ""))
+    # Trim trailing boiler-plate instructions that the dataset appends
+    description_trimmed = description[:-143] if len(description) > 143 else description
+    return description_trimmed
 
 
 def extract_solution(text: str) -> str:
@@ -292,6 +134,16 @@ def save_output(idx: int, output: str, output_dir: str):
     with open(filepath, 'w') as f:
         f.write(output)
     logger.info(f"Saved output to {filepath}")
+
+
+def save_prompt(idx, prompt_with_answer, reason_dir):
+    """Save reasoning trace to file."""
+    os.makedirs(reason_dir, exist_ok=True)
+    filename = os.path.join(reason_dir, f"reason_{idx}.txt")
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(prompt_with_answer)
+    logger.info(f"Saved reasoning trace to {filename}")
+
 
 def evaluate_spatialmap_answer(answer, options, ground_truth):
     """
@@ -350,7 +202,15 @@ if __name__ == "__main__":
                         help="Maximum number of correction attempts per example")
     parser.add_argument("--port", type=int, default=8000, help="vLLM server port")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logging")
+    parser.add_argument("--newline_threshold", type=int, default=20,
+                        help="Number of \\n\\n in thinking before triggering side verification")
+    parser.add_argument("--warmup", type=int, default=0,
+                        help="Number of \\n\\n to skip before starting side-chain verification (warmup period)")
     args = parser.parse_args()
+
+    logger.info(f"Thinking-phase verification: always on")
+    logger.info(f"  Newline threshold: {args.newline_threshold}")
+    logger.info(f"  Warmup: {args.warmup}")
     
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -385,6 +245,9 @@ if __name__ == "__main__":
     total_correct = 0
     total_examples = 0
     total_reasoning_tokens = 0
+    num_attempted = 0  # examples where a \boxed{} answer was produced (not "no solution")
+    reasoning_token_counts = []
+    per_example_results = []  # list of dicts for CSV
     
     # Per-type stats
     stats_by_type = {
@@ -395,9 +258,9 @@ if __name__ == "__main__":
     
     for idx in indices:
         example = dataset[idx]
-        system_prompt, user_prompt = build_meta_prompt_from_example(example)
+        user_prompt = build_simple_prompt(example)
         if str(example.get("ground_truth", "")).strip() == "Q4":
-                target_options = ["A", "B"]
+            target_options = ["A", "B"]
         else:
             target_options = ["A", "B", "C", "D"] 
         keys = "|".join(map(re.escape, target_options))
@@ -409,18 +272,26 @@ if __name__ == "__main__":
         # Determine question type
         question_type = get_question_type(idx)
         
-        # Build full prompt
-        full_prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        # Build simple prompt — no system/meta prompt; structure injected by monitor
+        full_prompt = f"<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n"
         
         logger.info(f"\n{'='*60}")
         logger.info(f"Example {idx} ({question_type})")
         logger.info(f"{'='*60}")
         
-        # Create the monitor with the problem text
-        monitor = StepVerifierSpatialMapMonitor.from_prompt(
+        # Always use ThinkingPhaseStepVerifierSpatialMapMonitor:
+        # Phase 1 — verifies during <think> via side-streams
+        # Phase 2a — injects structured step format after </think>
+        # Phase 2b — verifies structured output as model fills it in
+        monitor = ThinkingPhaseStepVerifierSpatialMapMonitor(
+            name="spatialmap_thinking_verifier",
             problem_text=user_prompt,
+            llm_server=llm_server,
+            prompt=full_prompt,
+            newline_threshold=args.newline_threshold,
             max_corrections=args.max_corrections,
-            name="spatialmap_step_verifier"
+            answer_start_token="</think>",
+            warmup_newlines=args.warmup,
         )
         
         logger.info(f"Z3 solver initialized with {len(monitor.z3_solver.parsed_relations)} relations")
@@ -441,13 +312,24 @@ if __name__ == "__main__":
             traceback.print_exc()
             continue
         
+        # Save reasoning trace
+        save_prompt(int(idx), answer, reason_dir)
+        logger.info(f"Raw final output:\n{answer}")
+
         # Count generated tokens
         reasoning_tokens = count_tokens(answer, tokenizer)
         total_reasoning_tokens += reasoning_tokens
+        reasoning_token_counts.append(reasoning_tokens)
+        logger.info(f"Generated tokens in this example: {reasoning_tokens}")
         
         # Evaluate the answer
         gt_sol = str(example.get("ground_truth", "")).strip()
         is_correct, extracted_answer, message = evaluate_spatialmap_answer(answer, options, gt_sol)
+        
+        # "attempted" = model produced a real \boxed{} answer (not "no solution")
+        attempted = (extracted_answer is not None and extracted_answer.strip().lower() != "no solution")
+        if attempted:
+            num_attempted += 1
         
         if extracted_answer:
             logger.info(f"Extracted answer: {extracted_answer}")
@@ -459,14 +341,13 @@ if __name__ == "__main__":
             
         total_examples += 1
         stats_by_type[question_type]["total"] += 1
-        # Save output
-        save_output(idx, answer, reason_dir)
         
         # Log result
         result = {
             'idx': int(idx),
             'question_type': question_type,
             'correct': is_correct,
+            'attempted': attempted,
             'sol': extracted_answer,
             'gt': gt_sol,
             'reasoning_tokens': reasoning_tokens,
@@ -475,12 +356,26 @@ if __name__ == "__main__":
         }
         results.append(result)
         
-        logger.info(f"Result: sol={extracted_answer}, gt={gt_sol}, correct={is_correct}")
+        per_example_results.append({
+            "index": int(idx),
+            "question_type": question_type,
+            "correct": is_correct,
+            "attempted": attempted,
+            "sol": extracted_answer if extracted_answer else "",
+            "gt": gt_sol,
+            "tokens": reasoning_tokens,
+            "num_relations": len(monitor.z3_solver.parsed_relations),
+            "verified_claims": len(monitor.verified_claims),
+            "message": message,
+        })
+        
+        logger.info(f"Result: sol={extracted_answer}, gt={gt_sol}, correct={is_correct}, attempted={attempted}")
         logger.info(f"Verified claims: {len(monitor.verified_claims)}")
         logger.info(f"Reasoning tokens: {reasoning_tokens}")
     
     # Compute final metrics
     accuracy = total_correct / total_examples if total_examples > 0 else 0
+    soundness = total_correct / num_attempted if num_attempted > 0 else 0  # correct / attempted
     avg_reasoning_tokens = total_reasoning_tokens / total_examples if total_examples > 0 else 0
     
     logger.info(f"\n{'='*60}")
@@ -488,7 +383,9 @@ if __name__ == "__main__":
     logger.info(f"{'='*60}")
     logger.info(f"Total examples: {total_examples}")
     logger.info(f"Correct: {total_correct}")
+    logger.info(f"Attempted (produced \\boxed answer): {num_attempted}/{total_examples}")
     logger.info(f"Accuracy: {accuracy:.4f} ({total_correct}/{total_examples})")
+    logger.info(f"Soundness: {soundness:.4f} ({total_correct}/{num_attempted})")
     logger.info(f"Total reasoning tokens: {total_reasoning_tokens}")
     logger.info(f"Avg reasoning tokens: {avg_reasoning_tokens:.1f}")
     
@@ -499,12 +396,27 @@ if __name__ == "__main__":
             acc = stats["correct"] / stats["total"]
             logger.info(f"  {qtype}: {acc:.4f} ({stats['correct']}/{stats['total']})")
     
+    print(f"\nFinal Accuracy: {total_correct}/{total_examples} ({accuracy:.2%})")
+    print(f"Soundness: {total_correct}/{num_attempted} ({soundness:.2%})")
+    print(f"Average Reasoning Tokens: {avg_reasoning_tokens:.2f}")
+    print(f"Total Reasoning Tokens: {total_reasoning_tokens}")
+    
+    # Save per-example CSV
+    csv_file = os.path.join(output_dirs["csv_saved"], f"results_{total_examples}examples.csv")
+    with open(csv_file, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=["index", "question_type", "correct", "attempted", "sol", "gt", "tokens", "num_relations", "verified_claims", "message"])
+        writer.writeheader()
+        writer.writerows(per_example_results)
+    logger.info(f"Per-example CSV saved to {csv_file}")
+    
     # Save summary
     summary = {
         'model': args.model,
         'total_examples': total_examples,
         'correct': total_correct,
+        'attempted': num_attempted,
         'accuracy': accuracy,
+        'soundness': soundness,
         'total_reasoning_tokens': total_reasoning_tokens,
         'avg_reasoning_tokens': avg_reasoning_tokens,
         'max_corrections': args.max_corrections,
@@ -516,3 +428,39 @@ if __name__ == "__main__":
     with open(summary_path, 'w') as f:
         json.dump(summary, f, indent=2)
     logger.info(f"\nSaved summary to {summary_path}")
+    
+    # Save results summary to a text file
+    results_file = os.path.join(output_dirs["base"], f"EAT_{total_examples}examples_results.txt")
+    with open(results_file, 'w') as f:
+        f.write(f"SpatialMap Step Verification Results\n")
+        f.write(f"{'='*50}\n\n")
+        f.write(f"Model: {args.model}\n")
+        f.write(f"Number of Examples: {total_examples}\n")
+        f.write(f"Max Corrections: {args.max_corrections}\n")
+        f.write(f"Newline Threshold: {args.newline_threshold}\n")
+        f.write(f"Warmup: {args.warmup}\n")
+        f.write(f"\n")
+        f.write(f"Results:\n")
+        f.write(f"---------\n")
+        f.write(f"Correct: {total_correct}/{total_examples}\n")
+        f.write(f"Accuracy: {accuracy:.2%}\n")
+        f.write(f"Attempted (produced \\boxed answer): {num_attempted}/{total_examples}\n")
+        f.write(f"Soundness (correct/attempted): {soundness:.2%}\n\n")
+        f.write(f"Per-type Breakdown:\n")
+        f.write(f"---------------------------\n")
+        for qtype, stats in stats_by_type.items():
+            if stats["total"] > 0:
+                acc = stats["correct"] / stats["total"]
+                f.write(f"  {qtype}: {acc:.2%} ({stats['correct']}/{stats['total']})\n")
+        f.write(f"\nToken Statistics:\n")
+        f.write(f"---------------------------\n")
+        f.write(f"Total Tokens: {total_reasoning_tokens}\n")
+        f.write(f"Average Tokens: {avg_reasoning_tokens:.2f}\n")
+        if reasoning_token_counts:
+            f.write(f"Median Tokens: {float(np.median(reasoning_token_counts)):.0f}\n")
+            f.write(f"Min Tokens: {min(reasoning_token_counts)}\n")
+            f.write(f"Max Tokens: {max(reasoning_token_counts)}\n")
+            f.write(f"Std Dev: {np.std(reasoning_token_counts):.2f}\n")
+    
+    logger.info(f"Results saved to {results_file}")
+    print(f"Results saved to {results_file}")

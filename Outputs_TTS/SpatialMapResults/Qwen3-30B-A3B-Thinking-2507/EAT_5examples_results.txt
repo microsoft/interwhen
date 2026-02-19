@@ -1,0 +1,30 @@
+SpatialMap Step Verification Results
+==================================================
+
+Model: Qwen/Qwen3-30B-A3B-Thinking-2507
+Number of Examples: 5
+Max Corrections: 3
+Newline Threshold: 20
+Warmup: 0
+
+Results:
+---------
+Correct: 4/5
+Accuracy: 80.00%
+Attempted (produced \boxed answer): 5/5
+Soundness (correct/attempted): 80.00%
+
+Per-type Breakdown:
+---------------------------
+  direction: 100.00% (2/2)
+  object: 100.00% (1/1)
+  counting: 50.00% (1/2)
+
+Token Statistics:
+---------------------------
+Total Tokens: 29208
+Average Tokens: 5841.60
+Median Tokens: 6193
+Min Tokens: 3503
+Max Tokens: 8820
+Std Dev: 1889.65

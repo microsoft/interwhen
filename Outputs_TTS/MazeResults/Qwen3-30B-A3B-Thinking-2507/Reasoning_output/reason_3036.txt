@@ -1,0 +1,579 @@
+Okay, let's try to figure out how many right turns there are in the path from S to E marked by X. First, I need to visualize the maze properly. The ASCII maze given is:
+
+#######
+#  XXX#
+###X#X#
+#  E#X#
+#####X#
+#SXXXX#
+#######
+
+Hmm, let's parse each line. Let's number the rows from top to bottom as rows 0 to 5 maybe. Wait, but maybe it's better to write them out with coordinates.
+
+Let me write each line with row numbers:
+
+Row 0: #######
+Row 1: #  XXX#
+Row 2: ###X#X#
+Row 3: #  E#X#
+Row 4: #####X#
+Row 5: #SXXXX#
+Row 6: #######
+
+Wait, actually, the maze as given has 7 lines (including the top and bottom walls), so rows 0 to 6. Let's check:
+
+Line 1: ####### (row 0)
+Line 2: #  XXX# (row 1)
+Line 3: ###X#X# (row 2)
+Line 4: #  E#X# (row 3)
+Line 5: #####X# (row 4)
+Line 6: #SXXXX# (row 5)
+Line 7: ####### (row 6)
+
+Wait, the user provided 7 lines. Let's index them as rows 0 to 6.
+
+Now, the maze:
+
+Row 0: 0 1 2 3 4 5 6
+        # # # # # # #
+
+Row 1: #   X X X #
+So positions (1,1) is space, (1,2) space, (1,3) X, (1,4) X, (1,5) X, (1,6) #
+
+Row 2: ###X#X#
+So row 2: # # # X # X #, so columns 0-6. So (2,3)=X, (2,5)=X
+
+Row 3: #  E#X#
+So (3,2)=space, (3,3)=E? Wait, no: #  E#X#, so columns:
+
+0: #, 1: space, 2: space, 3: E, 4: #, 5: X, 6: # ?
+
+Wait, let's break down each row character by character.
+
+Row 0: "#######" → all walls.
+
+Row 1: "#  XXX#" → characters at positions 0: #, 1: space, 2: space, 3: X, 4: X, 5: X, 6: #.
+
+Row 2: "###X#X#" → 0:#, 1:#, 2:#, 3:X, 4:#, 5:X, 6:#.
+
+Row 3: "#  E#X#" → 0:#, 1:space, 2:space, 3:E, 4:#, 5:X, 6:#.
+
+Row 4: "#####X#" → 0:#,1:#,2:#,3:#,4:#,5:X,6:#.
+
+Row 5: "#SXXXX#" → 0:#,1:S,2:X,3:X,4:X,5:X,6:#.
+
+Row 6: "#######".
+
+Wait, but the problem states that X marks the specific route to follow. So the path from S to E must follow X's. Let's find S and E.
+
+S is in row 5, column 1 (since row 5 is "#SXXXX#", so index 1 is S).
+
+E is in row 3, column 3 (row 3: "#  E#X#", so the E is at position 3).
+
+Now, the path is marked by X. So we need to trace from S (row5, col1) following X's to E (row3, col3).
+
+Wait, but S is at (5,1), and the X's are the path. Let's see the X's in the maze.
+
+Looking at each X:
+
+Row1: cols3,4,5 are X.
+
+Row2: col3 and 5 are X.
+
+Row3: col5 is X.
+
+Row4: col5 is X.
+
+Row5: cols2,3,4,5 are X.
+
+Wait, row5: #SXXXX#, so col1 is S, then col2-5 are X. So S is at (5,1), and the X path starts at (5,2) maybe? Wait, but S is the start, so the path from S should go through X's. Wait, but S is not X. Wait, the problem says "the path marked by X", so the correct path to follow is along X's. So S is the starting point, which is adjacent to X's perhaps.
+
+Wait, the maze says:
+
+- S denotes the starting point.
+
+- X marks the specific route you should follow.
+
+So the path from S to E must move through X's. So S is not part of the X path, but the path starts from S, then follows X's. Wait, but in the maze, S is at (5,1), and the cell to the right (5,2) is X. So the path starts at S (5,1), then moves to (5,2), which is X, then continues along X's.
+
+Similarly, E is at (3,3), which is adjacent to X's perhaps. Let's see.
+
+Let's map all X positions:
+
+Row 1: (1,3), (1,4), (1,5)
+
+Row 2: (2,3), (2,5)
+
+Row 3: (3,5)
+
+Row 4: (4,5)
+
+Row 5: (5,2), (5,3), (5,4), (5,5)
+
+Wait, row5: #SXXXX#, so columns 0:#, 1:S, 2:X, 3:X, 4:X, 5:X, 6:#. So (5,2) to (5,5) are X.
+
+So the path from S (5,1) must go to (5,2), then follow X's.
+
+Let's try to trace the path.
+
+Starting at S (5,1). The first move must be to (5,2), since that's the only X adjacent to S (since S is at (5,1), up would be row4, col1 which is # (row4 is #####X#, so col1 is #), down is row6, which is wall, left is col0 (wall), right is (5,2), which is X.
+
+So first direction is right (east) from S.
+
+Now, from (5,2), we need to follow X's. Let's list all X positions and see how they connect.
+
+Let's list all X cells:
+
+Row 1: (1,3), (1,4), (1,5)
+
+Row 2: (2,3), (2,5)
+
+Row 3: (3,5)
+
+Row 4: (4,5)
+
+Row 5: (5,2), (5,3), (5,4), (5,5)
+
+So the X's form a path. Let's see how they connect.
+
+Starting at (5,2), which is X. From (5,2), possible moves: up (row4, col2), but row4 col2 is # (row4: #####X#, so col2 is #), left is (5,1) which is S (not X), right is (5,3), which is X. So path continues east to (5,3).
+
+Then from (5,3), east to (5,4), then east to (5,5). Now at (5,5). From here, up (row4, col5) is X (row4 col5 is X), so move up to (4,5).
+
+From (4,5), up to row3, col5, which is X (row3 col5 is X), so move up to (3,5).
+
+From (3,5), up to row2, col5, which is X (row2 col5 is X), move up to (2,5).
+
+From (2,5), up to row1, col5, which is X (row1 col5 is X), move up to (1,5).
+
+From (1,5), left to (1,4), then left to (1,3). Wait, but row1 col3 is X. Wait, but row1 col3,4,5 are X. So from (1,5), moving west to (1,4), then west to (1,3). Now at (1,3). From (1,3), can we go down? Row2 col3 is X (row2 col3 is X), so down to (2,3).
+
+From (2,3), down to row3, col3. Wait, row3 col3 is E. Wait, row3: "#  E#X#", so col3 is E. So (3,3) is E. So from (2,3), moving down would reach (3,3), which is E.
+
+Wait, but according to the path, we need to follow X's. So the path should end at E. So the X path leads to E. So let's confirm:
+
+The path should be:
+
+Start at S (5,1) → move east to (5,2) [X], then east to (5,3), east to (5,4), east to (5,5), north to (4,5), north to (3,5), north to (2,5), north to (1,5), west to (1,4), west to (1,3), south to (2,3), south to (3,3)=E.
+
+Wait, but (2,3) is X, then moving south from (2,3) to (3,3), which is E. So the path is through X's until the last step to E.
+
+So the path of X's is from (5,2) to (5,5), then up to (4,5), (3,5), (2,5), (1,5), then left to (1,4), (1,3), then down to (2,3), then down to E.
+
+Wait, but (2,3) is X, so moving from (2,3) to (3,3) (E) is the last step. So the X path ends at (2,3), then E is adjacent.
+
+Now, we need to track the directions taken along the X path, and count the right turns.
+
+First, let's list the path step by step, noting the direction of movement between each cell.
+
+Starting at S (5,1), first move is east (right) to (5,2). So first direction: east.
+
+Now, from (5,2) to (5,3): east again. No turn.
+
+(5,3) to (5,4): east.
+
+(5,4) to (5,5): east.
+
+Now, from (5,5) to (4,5): north. So direction changes from east to north. What's the turn here? If previous direction was east, moving north would be a left turn (since east to north is 90 degrees counterclockwise, i.e., left turn). Wait, need to confirm.
+
+Movement direction: east (right), then moving north (up). So changing direction from east to north. To go from east to north, you turn left (since east is right, north is up; turning left from east would face north). So this is a left turn.
+
+But we need to count right turns. So this would be a left turn, not counted.
+
+Next, from (4,5) to (3,5): north again. No turn.
+
+(3,5) to (2,5): north.
+
+(2,5) to (1,5): north.
+
+Now, from (1,5) to (1,4): west. Previous direction was north, now moving west. From north to west is a left turn (since north to west is 90 degrees left). Wait, direction change: north to west. If facing north, turning left would face west. So yes, left turn. Not a right turn.
+
+Then from (1,4) to (1,3): west again. No turn.
+
+Now, from (1,3) to (2,3): south. Previous direction was west, now moving south. From west to south: turning right? Let's see. Facing west, turning right would face north? Wait, no.
+
+Wait, direction changes:
+
+Current direction before the move: west (from (1,4) to (1,3), direction west).
+
+Next move is south (from (1,3) to (2,3)). So changing direction from west to south.
+
+What's the turn here? If facing west, to face south, you turn right (90 degrees clockwise). Let's think:
+
+- Facing west (left), turning right (clockwise) would turn to north? Wait, no.
+
+Wait, standard directions:
+
+- East: right
+
+- North: up
+
+- West: left
+
+- South: down
+
+If you're moving west (left), then turning right (clockwise) would face north? Wait, no.
+
+Wait, imagine facing west (towards left on the screen). A right turn (clockwise) would make you face north (upwards), because clockwise from west would be north. Wait, no:
+
+Wait, if you're facing west (left), a right turn (clockwise) would turn you to face north? Let's see:
+
+- Facing north: right turn → east.
+
+- Facing east: right turn → south.
+
+- Facing south: right turn → west.
+
+- Facing west: right turn → north.
+
+Yes. So west to north is right turn.
+
+But here, we're moving west, then turning to south. Wait, direction change from west to south. So from west, to go south, which direction is the turn?
+
+West to south: if facing west, to face south, you need to turn right twice (180), but actually, the turn would be a right turn of 90 degrees? Wait, no.
+
+Wait, the direction of movement: previous direction was west (arriving at (1,3) from the east, i.e., moving west), now moving south. So the direction changed from west to south.
+
+To go from west to south, what's the turn?
+
+West → south: clockwise 90 degrees? Let's see:
+
+From west, clockwise 90 degrees would be north? Wait, no. Wait, standard compass:
+
+Clockwise turns:
+
+North → East → South → West → North.
+
+So if you're facing west, a clockwise (right) turn would face north. A counterclockwise (left) turn would face south.
+
+Wait, yes: if facing west, left turn (counterclockwise) would be to face south, and right turn would be to face north.
+
+Wait, let's confirm:
+
+- Facing north, left turn → west.
+
+- Facing north, right turn → east.
+
+Similarly, facing west:
+
+- Left turn (counterclockwise) → south.
+
+- Right turn (clockwise) → north.
+
+So if we were moving west (direction west), then change direction to south, that's a left turn.
+
+Wait, because from west, left turn (counterclockwise) would face south. So moving from west to south is a left turn.
+
+Hmm, this is a bit confusing. Let's think in terms of direction vectors.
+
+Previous direction: west (vector (-1,0) in terms of movement? Wait, maybe better to use compass directions.
+
+Let's say:
+
+- East: +x direction.
+
+- North: +y direction.
+
+Wait, but in grid terms, row numbers usually increase downward, so row 0 is top, row 5 is lower. So moving north would decrease row number, south increases row.
+
+But for direction purposes, maybe better to consider:
+
+When moving from cell A to cell B, the direction is based on the movement.
+
+So from (5,5) to (4,5): moving north (row decreases).
+
+From (1,5) to (1,4): moving west (column decreases).
+
+From (1,3) to (2,3): moving south (row increases).
+
+So previous direction before the move to (2,3) was west (since we were moving west to get to (1,3)), then the next move is south.
+
+So direction changed from west to south.
+
+To find the turn type: when moving west, then moving south, what's the turn.
+
+Imagine facing west (left), then turning to face south (down). To face south from west, you turn left (counterclockwise), because west → south is left.
+
+Yes: west to south is left turn.
+
+So this would be a left turn, not a right.
+
+Wait, but let's make sure. If you're moving west (left), to start moving south (down), you turn left (since turning left from west would face south). So yes, left turn.
+
+So this move would be a left turn, not counted.
+
+Then from (2,3) to (3,3): south again. No turn.
+
+So let's recap all the direction changes:
+
+Start at S (5,1), first move east (to (5,2)). So initial direction east.
+
+Path segments:
+
+1. (5,1) → (5,2): direction east.
+
+2. (5,2) → (5,3): east (no turn).
+
+3. (5,3) → (5,4): east.
+
+4. (5,4) → (5,5): east.
+
+5. (5,5) → (4,5): north (change from east → north: left turn).
+
+6. (4,5) → (3,5): north.
+
+7. (3,5) → (2,5): north.
+
+8. (2,5) → (1,5): north.
+
+9. (1,5) → (1,4): west (change from north → west: left turn).
+
+10. (1,4) → (1,3): west.
+
+11. (1,3) → (2,3): south (change from west → south: left turn).
+
+12. (2,3) → (3,3): south (to E).
+
+Now, let's list all the direction changes (i.e., where the direction changes from the previous step):
+
+- After step 4 (east to north at step 5): left turn.
+
+- After step 8 (north to west at step 9): left turn.
+
+- After step 10 (west to south at step 11): left turn.
+
+Wait, so all three direction changes are left turns. Are there any right turns?
+
+Wait, but according to this, there are zero right turns. But the options include B.0. But wait, maybe I made a mistake.
+
+Wait, let's re-examine the direction changes.
+
+Wait, step 5: moving north after east. East → north: left turn (as east to north is left).
+
+Step 9: moving west after north. North → west: left turn (north to west is left).
+
+Step 11: moving south after west. West → south: left turn.
+
+So all three direction changes are left turns. So no right turns. So answer would be B.0.
+
+But wait, the options are A.4, B.0, C.3, D.5. Hmm.
+
+Wait, but maybe I messed up the path. Let's confirm the path again.
+
+Alternative path: perhaps the path doesn't go all the way to (1,3), but maybe another way.
+
+Wait, let's retrace.
+
+From S (5,1), move east to (5,2), then east to (5,3), east to (5,4), east to (5,5). Then north to (4,5), north to (3,5), north to (2,5), north to (1,5). Now at (1,5). From here, west to (1,4), west to (1,3). Now, (1,3) is X. From (1,3), what's the next step? The only adjacent X's would be south to (2,3), which is X. So yes, down to (2,3), then down to (3,3)=E.
+
+So the path is correct.
+
+Another possibility: maybe from (2,5), instead of going north to (1,5), but no, row2 col5 is X, row1 col5 is X.
+
+Wait, but let's check if there's another path. For example, row2 has X at (2,3) and (2,5). So from (2,5), can we go west to (2,4), but row2 col4 is # (since row2 is ###X#X#, so col4 is #). So no, can't go west. So path must go north to row1.
+
+Hmm. So the path as traced seems correct.
+
+So all direction changes are left turns. So zero right turns. Answer B.0.
+
+Wait, but let's check again.
+
+Wait, another way: when moving from (5,5) north, direction east → north: left turn.
+
+Then moving west from north: north → west is left turn.
+
+West → south: left turn.
+
+No right turns. So answer B.0.
+
+But let's see the options. The problem states "the path marked by X", so maybe I missed a turn.
+
+Wait, wait, when moving from (1,3) south to (2,3), direction west → south. As discussed, left turn.
+
+Wait, but let's consider the direction of movement. The turn is determined by the change in direction. Let's use a different approach.
+
+List the direction of each move:
+
+Move 1: east
+
+Move 2: east
+
+Move 3: east
+
+Move 4: east
+
+Move 5: north
+
+Move 6: north
+
+Move 7: north
+
+Move 8: north
+
+Move 9: west
+
+Move 10: west
+
+Move 11: south
+
+Move 12: south
+
+Now, the direction changes occur between move 4 and 5 (east → north), move 8 and 9 (north → west), move 10 and 11 (west → south).
+
+Each of these changes:
+
+east → north: left turn.
+
+north → west: left turn.
+
+west → south: left turn.
+
+All left. So zero right turns.
+
+Hence, the answer should be B.0.
+
+But wait, the problem says "right turn is defined as a change in movement direction that is 90 degrees clockwise relative to the previous direction."
+
+So east to north: previous direction east. To get to north, turning left (counterclockwise), so not a right turn.
+
+east to south would be a right turn.
+
+north to east: right turn.
+
+But in our case, all changes are left.
+
+Hmm. So the answer is B.0.
+
+But let me check again if there's a different path.
+
+Wait, another way: from (5,5), instead of going north, is there another X? No, row4 col5 is X, which is the only way up.
+
+Wait, what about row2 col3: X. Could the path go from (5,5) up to (4,5), (3,5), (2,5), then west? But row2 col4 is #, so can't go west from (2,5). So must go north to (1,5).
+
+Hmm.
+
+Alternatively, after (1,5), moving west to (1,4), (1,3), then south to (2,3), which is X, then south to E. Yes, that's the path.
+
+Another check: let's count the turns again.
+
+Starting direction: east (from S to first X).
+
+After four east moves, turn north: left.
+
+Then four north moves, turn west: left.
+
+Then two west moves, turn south: left.
+
+Total three left turns, no right turns.
+
+Therefore, the number of right turns is zero. Answer B.
+</think>
+Let me trace the step by step solution through the maze in the following format:
+<format>
+>>> LOCATE START AND EXIT:
+    S position: (row, col)
+    E position: (row, col)
+
+>>> STEP 1: Move DOWN from (r1, c1) to (r2, c2)
+    Current position: (r2, c2)
+    Previous direction: —
+    Current direction: DOWN
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=0
+
+[... continue for all steps until reaching E ...]
+
+>>> FINAL ANSWER:
+    \boxed{LETTER}
+</format>
+>>> LOCATE START AND EXIT:
+    S position: (5, 1)
+    E position: (3, 3)
+
+>>> STEP 1: Move EAST from (5, 1) to (5, 2)
+    Current position: (5, 2)
+    Previous direction: —
+    Current direction: EAST
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=0
+
+>>> STEP 2: Move EAST from (5, 2) to (5, 3)
+    Current position: (5, 3)
+    Previous direction: EAST
+    Current direction: EAST
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=0
+
+>>> STEP 3: Move EAST from (5, 3) to (5, 4)
+    Current position: (5, 4)
+    Previous direction: EAST
+    Current direction: EAST
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=0
+
+>>> STEP 4: Move EAST from (5, 4) to (5, 5)
+    Current position: (5, 5)
+    Previous direction: EAST
+    Current direction: EAST
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=0
+
+>>> STEP 5: Move NORTH from (5, 5) to (4, 5)
+    Current position: (4, 5)
+    Previous direction: EAST
+    Current direction: NORTH
+    Turn type: LEFT (EAST → NORTH is 90° counterclockwise)
+    Running count: Right=0, Left=1
+
+>>> STEP 6: Move NORTH from (4, 5) to (3, 5)
+    Current position: (3, 5)
+    Previous direction: NORTH
+    Current direction: NORTH
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=1
+
+>>> STEP 7: Move NORTH from (3, 5) to (2, 5)
+    Current position: (2, 5)
+    Previous direction: NORTH
+    Current direction: NORTH
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=1
+
+>>> STEP 8: Move NORTH from (2, 5) to (1, 5)
+    Current position: (1, 5)
+    Previous direction: NORTH
+    Current direction: NORTH
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=1
+
+>>> STEP 9: Move WEST from (1, 5) to (1, 4)
+    Current position: (1, 4)
+    Previous direction: NORTH
+    Current direction: WEST
+    Turn type: LEFT (NORTH → WEST is 90° counterclockwise)
+    Running count: Right=0, Left=2
+
+>>> STEP 10: Move WEST from (1, 4) to (1, 3)
+    Current position: (1, 3)
+    Previous direction: WEST
+    Current direction: WEST
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=2
+
+>>> STEP 11: Move SOUTH from (1, 3) to (2, 3)
+    Current position: (2, 3)
+    Previous direction: WEST
+    Current direction: SOUTH
+    Turn type: LEFT (WEST → SOUTH is 90° counterclockwise)
+    Running count: Right=0, Left=3
+
+>>> STEP 12: Move SOUTH from (2, 3) to (3, 3)
+    Current position: (3, 3)
+    Previous direction: SOUTH
+    Current direction: SOUTH
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=3
+
+>>> FINAL ANSWER:
+    The path contains **0** right turns.
+    \boxed{B}

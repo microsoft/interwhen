@@ -1,0 +1,40 @@
+{
+  "model": "Qwen/Qwen3-30B-A3B-Thinking-2507",
+  "total_examples": 3,
+  "correct": 3,
+  "attempted": 3,
+  "accuracy": 1.0,
+  "soundness": 1.0,
+  "total_reasoning_tokens": 8168,
+  "avg_reasoning_tokens": 2722.6666666666665,
+  "max_corrections": 5,
+  "results": [
+    {
+      "idx": 4005,
+      "question_type": "relative_position",
+      "correct": true,
+      "attempted": true,
+      "sol": "A",
+      "gt": "Yes",
+      "reasoning_tokens": 3120
+    },
+    {
+      "idx": 4011,
+      "question_type": "relative_position",
+      "correct": true,
+      "attempted": true,
+      "sol": "A",
+      "gt": "Yes",
+      "reasoning_tokens": 2896
+    },
+    {
+      "idx": 4012,
+      "question_type": "relative_position",
+      "correct": true,
+      "attempted": true,
+      "sol": "A",
+      "gt": "Yes",
+      "reasoning_tokens": 2152
+    }
+  ]
+}

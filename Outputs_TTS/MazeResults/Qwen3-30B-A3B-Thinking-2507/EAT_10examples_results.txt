@@ -1,0 +1,24 @@
+Maze Step Verification Results
+==================================================
+
+Model: Qwen/Qwen3-30B-A3B-Thinking-2507
+Number of Examples: 10
+Max Corrections: 5
+Newline Threshold: 20
+Warmup: 0
+
+Results:
+---------
+Correct: 7/10
+Accuracy: 70.00%
+Attempted (produced \boxed answer): 7/10
+Soundness (correct/attempted): 100.00%
+
+Token Statistics:
+---------------------------
+Total Tokens: 66043
+Average Tokens: 6604.30
+Median Tokens: 5706
+Min Tokens: 3826
+Max Tokens: 15431
+Std Dev: 3255.06

@@ -1,0 +1,582 @@
+Okay, let's try to figure out how many right turns are in the path marked by X from S to E. First, I need to visualize the maze properly. The ASCII maze given is:
+
+#######
+#S#   #
+#X# ###
+#X#   #
+#X### #
+#XXE  #
+#######
+
+Hmm, let's break it down row by row. Each line represents a row in the maze. Let's index the rows starting from the top as row 0 maybe. Wait, but the actual maze is written as:
+
+Row 0: #######
+Row 1: #S#   #
+Row 2: #X# ###
+Row 3: #X#   #
+Row 4: #X### #
+Row 5: #XXE  #
+Row 6: #######
+
+Wait, but maybe the rows are as written. Let's count the lines. The user provided:
+
+#######
+#S#   #
+#X# ###
+#X#   #
+#X### #
+#XXE  #
+#######
+
+So that's 7 lines. Let's number them from top to bottom as rows 0 to 6.
+
+Row 0: ####### (all walls)
+Row 1: #S#   # (so positions 0: #, 1: S, 2: #, 3: space, 4: space, 5: space, 6: #)
+Row 2: #X# ### (positions: #, X, #, space, #, #, #)
+Row 3: #X#   # (similar to row 2 but spaces after the X)
+Row 4: #X### # (X followed by ### and then space and #)
+Row 5: #XXE  # (X, X, E, space, space, #)
+Row 6: #######
+
+Wait, but the maze's navigable path is marked by X. Wait, the problem states that X marks the specific route to follow. So the path from S to E is along the X's. So we need to trace the path from S through X's to E.
+
+Wait, S is in row 1, column 1 (assuming columns start at 0). Let's map each cell.
+
+Let's make a grid. Let's index rows from top to bottom (0 to 6), columns left to right (0 to 6).
+
+Row 0: 0-6: # # # # # # #
+Row 1: # S #   # (columns 0: #, 1:S, 2:#, 3:space, 4:space, 5:space, 6:#)
+Row 2: # X # ### (columns 0:#, 1:X, 2:#, 3:space, 4:#,5:#,6:#)
+Row 3: # X #   # (columns 0:#, 1:X, 2:#, 3:space, 4:space,5:space,6:#)
+Row 4: # X ### # (columns 0:#, 1:X, 2:#,3:#,4:#,5:space,6:#)
+Row 5: # X X E  # (columns 0:#,1:X,2:X,3:E,4:space,5:space,6:#)
+Row 6: # # # # # # #
+
+Wait, but row 5's E is at column 3. So the path from S (row1, col1) must go through the X's to reach E.
+
+Wait, but S is at (1,1), and the X's are in row2 col1, row3 col1, row4 col1, row5 col1 and row5 col2. Hmm. Wait, let's check each row.
+
+Row 1: S is at (1,1). The path starts here. The X's are supposed to be the path. Wait, but S is the start, and E is the end. The X's mark the route. So perhaps the path is S -> X -> X -> ... -> E.
+
+Wait, but looking at the maze:
+
+Row 1: #S#   # → so S is at (1,1). To the right of S (col2) is a wall (#), so the path must go down or up. But up is row0 which is all walls. So from S (row1, col1), the only possible move is down (row2, col1), which is X. So the path starts at S, then moves down to X (row2, col1).
+
+Wait, but let's check row2: #X# ### → so (row2, col1) is X. So from S (row1, col1), moving down to row2, col1 (X). Then, what's next? Let's see the path.
+
+We need to follow the X's. So the path is S → X → X → ... → E.
+
+Let's list all X positions:
+
+Row 2, col1: X
+
+Row 3, col1: X
+
+Row 4, col1: X
+
+Row 5, col1: X
+
+Row 5, col2: X
+
+E is at row5, col3.
+
+Wait, so the path would go from S (row1, col1) down to row2, col1 (X), then down to row3, col1 (X), then down to row4, col1 (X), then down to row5, col1 (X), then right to row5, col2 (X), then right to E (row5, col3). Wait, but E is at row5, col3. So the path would be S → (down) X → X → X → X → X → E. Wait, but row5, col1 is X, then row5, col2 is X, then col3 is E.
+
+Wait, but the X's are the path. So the path from S to E must go through all X's. So the path is S (row1, col1) → row2 col1 (X) → row3 col1 (X) → row4 col1 (X) → row5 col1 (X) → row5 col2 (X) → E (row5, col3).
+
+Wait, but row5 col2 is X. So the path goes from row5 col1 (X) to row5 col2 (X), then to E (col3). So the path steps are:
+
+Start at S (1,1).
+
+Move down to (2,1) [X]
+
+Down to (3,1) [X]
+
+Down to (4,1) [X]
+
+Down to (5,1) [X]
+
+Right to (5,2) [X]
+
+Right to (5,3) [E]
+
+Wait, but is that the case? Let's check the maze again.
+
+Row 5: #XXE  # → columns 0: #, 1:X, 2:X, 3:E, 4:space, 5:space, 6:#. So yes, row5, col1 and col2 are X, then E at col3.
+
+So the path from S to E is moving down four times (from row1 to row5 in col1), then right twice (to col2, then col3). Wait, but row5, col1 to col2 is right, then col2 to col3 is right again. But E is at col3. So the path is:
+
+Start at S (1,1).
+
+Direction down to (2,1).
+
+Then down to (3,1).
+
+Then down to (4,1).
+
+Then down to (5,1).
+
+Then right to (5,2).
+
+Then right to (5,3) (E).
+
+So the directions taken are: down, down, down, down, right, right.
+
+Wait, but movement direction changes. To count right turns, we need to track the direction of movement and see when a right turn occurs.
+
+First, starting direction: when moving from S (1,1) to (2,1), the direction is down. So the first move is down.
+
+Then next move is down again (to row3, col1), so same direction. No turn.
+
+Then down again (row4, col1), same direction. No turn.
+
+Then down again (row5, col1), same direction. No turn.
+
+Then move right (from col1 to col2), which is a right turn from down. Wait, direction was down, then moving right. Let's think: if you're moving down (south), a right turn would be to face east (right), which would be moving right. Wait, movement direction: if you are moving down (south), turning right would face east (right), so moving east (right) is a right turn. Wait, yes. Let's clarify:
+
+Assuming the standard directions:
+
+- Facing down (south), a right turn would make you face east (right), so moving right (east) would be a right turn.
+
+Wait, but movement direction: when moving from one cell to another, the direction you were moving to get there.
+
+Wait, the problem says: "A right turn is defined as a change in movement direction that is 90 degrees clockwise relative to the previous direction."
+
+So, for example, if you were moving down (south), then turn right would face east (right), so next movement direction is east (right). So the turn from south to east is a right turn.
+
+Similarly, moving east, a right turn would face south.
+
+So in our path:
+
+First move: from S (1,1) to (2,1) → direction down (south).
+
+Second move: from (2,1) to (3,1) → direction still down. No turn.
+
+Third move: (3,1) to (4,1) → down again. No turn.
+
+Fourth move: (4,1) to (5,1) → down again. No turn.
+
+Fifth move: (5,1) to (5,2) → direction right (east). Previous direction was down. So changing from down to right (east) is a right turn (since right from down is east).
+
+Sixth move: (5,2) to (5,3) → direction still east. No turn.
+
+Wait, so only one right turn here. But the options don't have 1. Wait, this can't be right. Maybe I'm missing something.
+
+Wait, maybe the path isn't all down then right. Let's double-check the maze.
+
+Wait, row 4: #X### #. So row4, col1 is X. Then row4, col2 is #, col3 #, col4 #, col5 space. So from row4, col1 (X), moving down to row5, col1 (X), which is possible. Then row5, col1 to col2 (X), then to E.
+
+But wait, row5, col1 to col2: that's moving east (right), so direction change from down to east is a right turn. Then moving east again (col2 to col3), no turn. So only one right turn. But the options are 9, 0,4,7. Hmm. So 1 is not an option. So I must have made a mistake.
+
+Wait, perhaps the path is different. Maybe the X's are not all in a straight line. Let's check again.
+
+Wait, row2: #X# ### → so columns 0:#, 1:X, 2:#, 3:space, 4:#,5:#,6:#. So row2, col1 is X, but col2 is #, so can't move right from there. So from row2, col1 (X), you can't go east (right) because col2 is a wall. So the path must go down to row3, col1.
+
+Row3: #X#   # → same structure. col1 is X, col2 is #, so can't go east. So path continues down to row4, col1.
+
+Row4: #X### # → col1 is X, col2 is #, so again, can't move east. So path continues down to row5, col1.
+
+Row5: #XXE  # → col1 and 2 are X. So from row5, col1, can move east to col2 (X), then east to E.
+
+So the path is indeed down, down, down, down, right, right. So the direction changes only once: from down to east (right turn), then continuing east. So only one right turn. But 1 isn't an option. Hmm. So something's wrong here.
+
+Wait, maybe the path is not straight down. Wait, let's re-examine the maze.
+
+Wait, row 1: #S#   # → so S is at (1,1), surrounded by walls on left (col0), right (col2), and above (row0). So S can only go down (row2, col1), which is X.
+
+Row2: #X# ### → X at (2,1). From here, can we move east? (2,2) is #, so no. Can we move west? (2,0) is #. So only down to row3, col1.
+
+Row3: #X#   # → X at (3,1). Similarly, can't go east (col2 is #), so must go down to row4, col1.
+
+Wait, I made an error at Step 5. Turn type RIGHT_TURN should be LEFT_TURN. Going from SOUTH to EAST is a counterclockwise (LEFT turn) rotation.; Right turn count 1 should be 0; Left turn count 0 should be 1. Let me re-trace the path more carefully from the correct position.
+Wait, direction when moving down (south), a right turn would be to face east (right), so moving east would be a right turn. But according to the problem statement, right turn is 90 degrees clockwise. So if you're moving south, turning right (clockwise) would face west? Wait, no. Wait, directions:
+
+Imagine facing south (down). A right turn (clockwise) would turn you to face west? No. Wait, standard compass directions:
+
+If facing north, right turn is east.
+
+Facing east, right turn is south.
+
+Facing south, right turn is west.
+
+Facing west, right turn is north.
+
+Wait, no. Wait, if you're facing south (down), a clockwise right turn would turn you to face west (left from south?), wait maybe I'm confused.
+
+Let's clarify:
+
+When you move in a direction, your facing direction is that direction. A right turn (clockwise) would change your facing direction 90 degrees clockwise.
+
+So:
+
+- If you're moving south (down), facing south. A right turn (clockwise) would make you face west (since turning right from south would point west? Wait, no. Let's think of a compass:
+
+North (up), East (right), South (down), West (left).
+
+Facing north: right turn → east.
+
+Facing east: right turn → south.
+
+Facing south: right turn → west.
+
+Facing west: right turn → north.
+
+Yes, that's correct.
+
+So if you're moving south (direction south), then a right turn would face west. But in our path, after moving south (down), we want to move east (right), which would be a left turn.
+
+Wait, this is critical. So the direction change from south to east would be a left turn, not a right turn.
+
+Because moving south, then turning left (anticlockwise) would face east.
+
+Wait, let's confirm:
+
+Facing south (down), turning left (anticlockwise 90) → east.
+
+Turning right (clockwise 90) → west.
+
+So moving from south to east is a left turn.
+
+Ah! This is probably where I messed up earlier.
+
+So in the path:
+
+After moving down (south) four times, then moving east (right), the direction change is from south to east, which is a left turn, not a right turn.
+
+So then, the turn would be a left turn. So no right turns in the path. Then the answer would be B. 0.
+
+But wait, let's make sure.
+
+Path steps:
+
+Start at S (1,1). Move down to (2,1): direction south.
+
+Next move down to (3,1): still south. No turn.
+
+Down to (4,1): south. No turn.
+
+Down to (5,1): south. No turn.
+
+Then move east to (5,2): direction east. Change from south to east. This is a left turn (since left turn from south is east).
+
+Then move east to (5,3): still east. No turn.
+
+So all direction changes (only one change) is a left turn. So no right turns. So answer B. 0.
+
+But the options include B. 0. But wait, maybe I'm missing some turns.
+
+Wait, is there another part of the path that I'm not considering? Let's check again.
+
+Wait, are there any other X's that form a different path?
+
+Wait, the problem says "the path marked by X". So the X's are the path. So we must follow all X's from S to E.
+
+Wait, S is not an X. The X's start from row2, col1. So the path is S → X → X → X → X → X → E.
+
+Wait, S to first X (row2, col1), then through all X's to E.
+
+But according to the maze, the X's are at:
+
+row2 col1,
+
+row3 col1,
+
+row4 col1,
+
+row5 col1,
+
+row5 col2.
+
+So five X's. So path is S → X (row2) → X (row3) → X (row4) → X (row5 col1) → X (row5 col2) → E.
+
+So the movement directions:
+
+From S (row1, col1) to row2 col1: down.
+
+row2 to row3: down.
+
+row3 to row4: down.
+
+row4 to row5: down.
+
+row5 col1 to row5 col2: right (east).
+
+row5 col2 to E: right (east).
+
+So only one direction change: down → east.
+
+As established, down to east is a left turn. So no right turns. So answer B. 0.
+
+But let's check again. Maybe there's another turn. Wait, what about if the path takes a different route? Wait, but according to the maze, the X's are only in those positions. So we have to follow the X's. So the path must go through all X's. So the path is as described.
+
+Wait, but maybe the X's form a different path. Let's look at the maze again.
+
+Row 1: #S#   # → S at (1,1), then spaces to the right.
+
+Row 2: #X# ### → X at (2,1), then #, then spaces, then #s.
+
+Row3: #X#   # → X at (3,1), then #, then spaces.
+
+Row4: #X### # → X at (4,1), then ###, then space.
+
+Row5: #XXE  # → X at (5,1), X at (5,2), E at (5,3).
+
+So the X's are all in column 1 from row2 to row5, then column 2 row5. So path is straight down column 1, then right along row5.
+
+No other X's. So path must be as above.
+
+Thus, only one turn, which is left. So no right turns. Answer B. 0.
+
+But wait, let's check the problem statement again: "the path marked by X". So the X's are the correct path. So we have to follow the X's. So the movement is along the X's. So the path is S to first X, then next X, etc.
+
+But S is not an X. So the first step is from S (which is a cell) to the first X. So the path starts at S, then moves to X (row2, col1), which is the first X. Then to next Xs.
+
+So the directions are as before.
+
+Wait, but what if the starting direction is considered. When you start at S, you have to move to the first X. So your first move is down. Then subsequent moves.
+
+But the first direction is down. Then no turns until the east move.
+
+So only one direction change (left turn), so zero right turns. So answer B.
+
+But why is option C 4? Maybe I'm missing something. Let's think again.
+
+Wait, perhaps the path is not all down. Let's check row4. Row4 is #X### #. So at row4, col1 (X), can we move east? Col2 is #, so no. So must move down to row5, col1.
+
+Row5, col1 is X. From there, east to col2 (X), then east to E.
+
+Wait, another possibility: perhaps the path has more turns. Let's map all the X's.
+
+List of X's:
+
+(2,1), (3,1), (4,1), (5,1), (5,2).
+
+So the path is (1,1) → (2,1) → (3,1) → (4,1) → (5,1) → (5,2) → (5,3).
+
+So the movement vectors:
+
+From (1,1) to (2,1): down.
+
+(2,1) to (3,1): down.
+
+(3,1) to (4,1): down.
+
+(4,1) to (5,1): down.
+
+(5,1) to (5,2): right.
+
+(5,2) to (5,3): right.
+
+So the direction changes occur only once: from down to right. As discussed, this is a left turn.
+
+So no right turns. Answer B. 0.
+
+But why would the options include 4 or 7? Maybe I'm misinterpreting the maze.
+
+Wait, let's check the maze again as provided:
+
+The ASCII maze:
+
+#######
+#S#   #
+#X# ###
+#X#   #
+#X### #
+#XXE  #
+#######
+
+Wait, row 2 is #X# ###. So columns:
+
+0: #, 1:X, 2:#, 3:space, 4:#, 5:#, 6:#.
+
+Row3: #X#   # → 0:#, 1:X, 2:#, 3:space, 4:space, 5:space, 6:#.
+
+Row4: #X### # → 0:#, 1:X, 2:#, 3:#, 4:#, 5:space, 6:#.
+
+Row5: #XXE  # → 0:#, 1:X, 2:X, 3:E, 4:space, 5:space, 6:#.
+
+Wait, row5, col5 is space, but not relevant.
+
+Wait, in row4, col5 is space. So row4, col5 is space. But our path doesn't go there.
+
+Wait, but what if the path isn't straight down? Let's see. From row2, col1 (X), can we move east? No, col2 is #. Can we move north? Back to S, which is start. So no. So must go down.
+
+Same for row3, col1: can't go east or west, so must go down.
+
+Row4, col1: same.
+
+So the path is straight down.
+
+Hmm. So unless the problem counts the direction changes differently.
+
+Wait, another thought: maybe when you move from S to row2, col1, that's the first direction (down), and then all the way down, then a turn. But perhaps the problem counts the turn when leaving the X path. Not sure.
+
+Wait, the problem states: "navigate from S to E by following the path marked by X". So the path includes the X's. So the path is S → X → X → X → X → X → E. So the X's are the path, meaning the route is through those cells. So movement through the X's.
+
+So the path's direction changes are between the X's.
+
+Wait, S is not an X. So the first move is from S (not X) to the first X. Then the path through X's.
+
+But the turns are counted based on the direction of movement through the path. So the movement from S to first X is direction down. Then from first X to second X is down, etc. So the turns happen between the X's.
+
+Wait, but the turn is when changing direction. So from S to first X: direction down. Then first X to second X: down (no turn). Second to third: down. Third to fourth: down. Fourth X (row5, col1) to fifth X (row5, col2): direction east. So change from down to east: left turn. Fifth X to E: east (no turn).
+
+So only one turn, left. So zero right turns.
+
+Thus, the answer should be B. 0.
+
+But why would the problem have other options? Maybe I'm missing a part of the maze.
+
+Wait, looking at row 3: #X#   #. After the X at col1, there's a space at col3. Could there be a path that goes east from row3?
+
+Wait, row3, col1 is X. To move east (col2), but col2 is #, so no. So can't go east. So the path must continue down.
+
+Same for row2.
+
+Another check: row4 is #X### #. So after col1 (X), col2 is #, so can't go east. So path must go down.
+
+Thus, the path is indeed straight down then east.
+
+Hmm. Maybe the problem counts the final move to E as part of the path, but that doesn't affect the turns.
+
+Wait, let's think of another possibility. If the path is different. Suppose the X's are not all in a line. Wait, maybe I misread the maze.
+
+Wait, let's write out the maze with coordinates:
+
+Row 0: 0 1 2 3 4 5 6
+        # # # # # # #
+
+Row 1: # S #   # 
+        0 1 2 3 4 5 6
+
+Row 2: # X # # # # 
+        Wait, no. Original row 2: #X# ### → so:
+
+Row 2: 0:#, 1:X, 2:#, 3:space, 4:#,5:#,6:#.
+
+Row 3: #X#   # → 0:#,1:X,2:#,3:space,4:space,5:space,6:#.
+
+Row 4: #X### # → 0:#,1:X,2:#,3:#,4:#,5:space,6:#.
+
+Row 5: #XXE  # → 0:#,1:X,2:X,3:E,4:space,5:space,6:#.
+
+Yes, so X's are at (2,1), (3,1), (4,1), (5,1), (5,2).
+
+Path is as before.
+
+Wait, another idea: perhaps the movement from row5, col2 to E is not counted, but the turn before that. But no, the turn is between directions.
+
+Wait, let's list all direction changes:
+
+Move 1: S (1,1) → (2,1): direction down.
+
+Move 2: (2,1) → (3,1): down.
+
+Move 3: (3,1) → (4,1): down.
+
+Move 4: (4,1) → (5,1): down.
+
+Move 5: (5,1) → (5,2): right.
+
+Move 6: (5,2) → (5,3): right.
+
+So between move 4 and move 5: direction changes from down to right.
+
+As established, this is a left turn.
+
+No other direction changes. So zero right turns.
+
+Therefore, the answer should be B. 0.
+
+But the options given are A.9 B.0 C.4 D.7.
+
+So B.0 is an option. So likely the answer is B.
+
+But why would the question be asked if it's zero? Maybe I made a mistake in the turn direction.
+
+Let me confirm once more:
+
+Current direction: south (down).
+
+Next direction: east (right).
+
+To go from south to east, which way do you turn?
+
+If you're facing south, to turn towards east, you turn left (counterclockwise), because east is to your left when facing south.
+
+Yes: facing south, left turn → east.
+
+Right turn would be west.
+
+So yes, it's a left turn.
+
+Therefore, no right turns. Answer B.
+
+I think that's correct. So the answer is B.
+</think>
+Let me trace the step by step solution through the maze in the following format:
+<format>
+>>> LOCATE START AND EXIT:
+    S position: (row, col)
+    E position: (row, col)
+
+>>> STEP 1: Move DOWN from (r1, c1) to (r2, c2)
+    Current position: (r2, c2)
+    Previous direction: —
+    Current direction: DOWN
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=0
+
+[... continue for all steps until reaching E ...]
+
+>>> FINAL ANSWER:
+    \boxed{LETTER}
+</format>
+>>> LOCATE START AND EXIT:
+    S position: (1, 1)
+    E position: (5, 3)
+
+>>> STEP 1: Move DOWN from (1, 1) to (2, 1)
+    Current position: (2, 1)
+    Previous direction: —
+    Current direction: DOWN
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=0
+
+>>> STEP 2: Move DOWN from (2, 1) to (3, 1)
+    Current position: (3, 1)
+    Previous direction: DOWN
+    Current direction: DOWN
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=0
+
+>>> STEP 3: Move DOWN from (3, 1) to (4, 1)
+    Current position: (4, 1)
+    Previous direction: DOWN
+    Current direction: DOWN
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=0
+
+>>> STEP 4: Move DOWN from (4, 1) to (5, 1)
+    Current position: (5, 1)
+    Previous direction: DOWN
+    Current direction: DOWN
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=0
+
+>>> STEP 5: Move RIGHT from (5, 1) to (5, 2)
+    Current position: (5, 2)
+    Previous direction: DOWN
+    Current direction: RIGHT (EAST)
+    Turn type: LEFT (since DOWN → EAST is a left turn)
+    Running count: Right=0, Left=1
+
+>>> STEP 6: Move RIGHT from (5, 2) to (5, 3) [E]
+    Current position: (5, 3)
+    Previous direction: RIGHT
+    Current direction: RIGHT
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=1
+
+>>> FINAL ANSWER:
+    \boxed{B}
