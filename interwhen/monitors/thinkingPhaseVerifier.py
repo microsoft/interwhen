@@ -959,16 +959,23 @@ class ThinkingPhaseStepVerifierMazeMonitor(VerifyMonitor):
         # --- Build feedback ---
         sr, sc = self.start_pos
         er, ec = self.exit_pos
+        correct_letter = 'A' if expected_yn == 'Yes' else 'B'
         feedback = (
             f"\n\n[VERIFIER FEEDBACK for relative position:\n"
             f"  ✗ Your answer {boxed_answer} ({model_yn}) is incorrect.\n"
+            f"  IMPORTANT: In this task, \"{asked_raw}\" means the GENERAL "
+            f"COMPASS DIRECTION, NOT immediate adjacency. It asks whether E "
+            f"is in the {actual} direction from S, regardless of distance or "
+            f"walls between them.\n"
             f"  S is at row={sr}, col={sc}. E is at row={er}, col={ec}.\n"
             f"  Row difference (E-S): {er - sr} ({'same row' if er == sr else ('E is below S' if er > sr else 'E is above S')}).\n"
             f"  Col difference (E-S): {ec - sc} ({'same col' if ec == sc else ('E is right of S' if ec > sc else 'E is left of S')}).\n"
             f"  Therefore E is {actual} of S → the correct answer to "
             f"\"{asked_raw}\" is {expected_yn}.\n"
-            f"  Please output \\boxed{{{('A' if expected_yn == 'Yes' else 'B')}}} "
-            f"for {expected_yn}.]\n\n"
+            f"  Do NOT consider adjacency or walls. Just compare the row/col "
+            f"coordinates of S and E.\n"
+            f"  Output \\boxed{{{correct_letter}}} for {expected_yn}. "
+            f"This is the verified correct answer — do not argue.]\n\n"
         )
         return False, feedback
 
