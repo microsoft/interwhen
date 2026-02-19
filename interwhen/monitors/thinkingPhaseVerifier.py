@@ -1,86 +1,209 @@
 """
-Thinking Phase Step Verifier for Game of 24.
+Thinking Phase Verifiers for Game of 24 and Maze.
 
-This monitor verifies Game-of-24 solutions by injecting a structured-output
-prompt after ``</think>`` — whether that ``</think>`` was forced by us (during
-the thinking phase) or produced naturally by the model.
+These monitors verify solutions by forking a side-stream during the thinking
+phase to ask the model about its current progress.
 
-Workflow
---------
+Game of 24 Workflow
+-------------------
 A) **DURING the thinking phase** (inside ``<think>...</think>``):
-   After every *N* newlines in the thinking trace:
-   1. Inject ``\\n</think>\\n`` + a *structured output prompt* that asks the
-      model to list its current solution as verified steps.
-   2. Stream from the vLLM server to collect those steps.
-   3. Verify each step with the existing ``verify_step`` utilities.
-   4. If **wrong** -> remove the injected ``</think>`` + prompt + generated
-      steps, append ``Wait, that approach is wrong. ...`` inside the thinking
-      trace, and let the model keep thinking.
-   5. If **correct** -> keep ``</think>`` + the structured prompt, let
-      ``stream_completion`` recurse so the model finishes (Phase B verifies
-      each step as it streams).
+   After a warmup period, every *N* double-newlines in the thinking trace:
+   1. Inject ``</think> The expression that I found till now is {`` and
+      stream ~20 tokens to extract the expression the model outputs.
+   2. Verify the expression:
+      a. Extract numbers used in the expression.
+      b. Check each number appears in the original numbers (at most once).
+      c. If ALL four numbers are used: evaluate and check == 24.
+      d. If partial: evaluate the sub-expression, collect unused original
+         numbers, check ``can_reach_24([result] + unused)``.
+   3. If **wrong** -> strip the injected text, append
+      ``Wait, <error description>.`` inside the thinking trace and let
+      the model keep thinking.
+   4. If **correct AND complete** (all 4 numbers, equals 24) -> inject
+      ``Wait, current expression that I am able to generate seems to be
+      passed by the verifier, so let me stop and give the answer.
+      </think>`` and then let the model output the final answer.
+   5. If **correct AND partial** -> no feedback, let the model keep
+      thinking undisturbed.
 
 B) **AFTER a natural ``</think>``**:
-   Inject the same structured output prompt so the model outputs its steps
-   in the verifiable format. Then behave identically to
-   ``StepVerifierGame24Monitor`` — verify each step as it appears and give
-   ``[VERIFIER FEEDBACK ...]`` on the first error so the model retries.
+   Inject the same expression extraction prompt so the model outputs its
+   answer expression, then verify in the same way.  Give feedback on
+   errors so the model retries.
+
+Maze Workflow
+-------------
+A) **DURING the thinking phase** (inside ``<think>...</think>``):
+   After a warmup period, every *N* double-newlines in the thinking trace:
+   1. Inject a first-person prompt in the LLM's own voice:
+      ``Let me output the current steps I have traced so far through
+      the maze in the following format:`` + ``<format>...</format>``
+      + ``>>> LOCATE START AND EXIT:``.  Stream ~300 tokens to
+      extract the model's current traced path steps.
+   2. Parse the structured steps and verify each against the maze grid:
+      a. Is the move direction correct (delta matches)?
+      b. Is from_pos the expected position?
+      c. Is to_pos walkable (not a wall)?
+      d. Is the turn type correct?
+      e. Are running counts correct?
+   3. If **errors found** -> strip the injected text, append
+      ``Wait, <error description>.`` and let the model keep thinking.
+   4. If **path reaches E with all steps correct** -> inject early-stop
+      message + ``</think>`` followed by the structured format prompt
+      so the model gives the final answer in the specified format.
+   5. If **partial but correct so far** -> no feedback, keep thinking.
+
+B) **AFTER ``</think>`` (natural or early-stop)**:
+   Phase 2a: Inject the same structured step format template (in the
+   LLM's own voice: ``Let me trace the step by step solution...`` +
+   ``<format>...</format>`` + ``>>> LOCATE START AND EXIT:``) so the
+   model fills it in.
+
+   Phase 2b: Verify each step as the model fills in the template.
+   Once ``\\boxed{}`` appears, stop generation.
 """
 
 import re
 import json
 import logging
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Tuple, Optional
 from copy import deepcopy
 
 import httpx
 
 from .base import VerifyMonitor
 from ..utils.game24_verifier import (
-    parse_step, verify_step, format_feedback, can_reach_24, format_number
+    can_reach_24, is_close, format_number, safe_eval,
+)
+from ..utils.maze_verifier import (
+    Direction, parse_direction, get_expected_turn_type,
+    parse_maze_from_prompt, parse_maze_step, verify_maze_step,
+    verify_locate_section, format_maze_feedback, format_locate_feedback,
+    DIRECTION_DELTAS,
 )
 
 logger = logging.getLogger(__name__)
 
-# ──────────────────────────────────────────────────────────────────────
-#  The structured-output prompt injected right after </think>.
-#  It tells the model to present its solution in the step format that
-#  our verifier can parse, AND to put the final answer in \boxed{}.
-# ──────────────────────────────────────────────────────────────────────
-STRUCTURED_OUTPUT_PROMPT = (
-    "Now present your solution step-by-step in the following format. "
-    "Use ALL four numbers exactly once with +, -, *, / to reach 24.\n"
-    "\n"
-    ">Step1\n"
-    "available numbers: [a, b, c, d]\n"
-    "suggested operation: a * b = result1\n"
-    "remaining numbers: [result1, c, d]\n"
-    "\n"
-    ">Step2\n"
-    "available numbers: [result1, c, d]\n"
-    "suggested operation: result1 + c = result2\n"
-    "remaining numbers: [result2, d]\n"
-    "\n"
-    ">Step3\n"
-    "available numbers: [result2, d]\n"
-    "suggested operation: result2 - d = result3\n"
-    "remaining numbers: [result3]\n"
-    "\n"
-    "> Final expression: \\boxed{expression using original numbers}"
+# ---------------------------------------------------------------------------
+#  Prompts injected to elicit an expression from the model.
+# ---------------------------------------------------------------------------
+
+# Injected during the thinking phase (after </think>)
+THINKING_PHASE_EXPRESSION_PROMPT = (
+    "</think>\nThe expression that I found till now is {"
 )
+
+# Injected after a natural </think> to force the model to emit \boxed{expr}
+FINAL_EXPRESSION_PROMPT = (
+    "\nThe final expression is \\boxed"
+)
+
+
+def _extract_numbers_from_expr(expr: str) -> List[float]:
+    """Extract all numbers (integers and decimals) from an expression string."""
+    numbers = re.findall(r'\d+\.?\d*', expr)
+    return [int(float(n)) if float(n) == int(float(n)) else float(n) for n in numbers]
+
+
+def _normalize_number(n) -> float:
+    """Normalize a number for comparison."""
+    return float(n)
+
+
+def verify_expression(expr_str: str, original_numbers: List[float]) -> Tuple[str, bool, List[str], Optional[List[float]]]:
+    """
+    Verify an expression against the Game of 24 rules.
+
+    Args:
+        expr_str: The arithmetic expression string (e.g. "1*2", "(3+5)*7/11")
+        original_numbers: The four original numbers.
+
+    Returns:
+        (status, is_valid, errors, unused_numbers_or_None)
+        - status: "complete" | "partial" | "error"
+        - is_valid: True if the expression is valid (no errors)
+        - errors: List of error messages
+        - unused_numbers: Numbers from original not used in expr (None if errors)
+    """
+    errors = []
+    fmt = format_number
+
+    # 1. Extract numbers used in the expression
+    used_numbers = _extract_numbers_from_expr(expr_str)
+    if not used_numbers:
+        errors.append(f"No numbers found in expression: {expr_str}")
+        return "error", False, errors, None
+
+    # 2. Check each used number appears in original (at most once)
+    original_copy = [_normalize_number(n) for n in original_numbers]
+    matched_indices = []
+    for used_n in used_numbers:
+        used_norm = _normalize_number(used_n)
+        found = False
+        for i, orig_n in enumerate(original_copy):
+            if i not in matched_indices and is_close(used_norm, orig_n):
+                matched_indices.append(i)
+                found = True
+                break
+        if not found:
+            errors.append(
+                f"Number {fmt(used_norm)} in expression is not available in "
+                f"original numbers {[fmt(n) for n in original_numbers]} "
+                f"(or was already used)"
+            )
+
+    if errors:
+        return "error", False, errors, None
+
+    # 3. Compute unused original numbers
+    unused = [original_copy[i] for i in range(len(original_copy)) if i not in matched_indices]
+
+    # 4. Evaluate the expression
+    try:
+        value = eval(expr_str, {"__builtins__": None}, {})
+        value = float(value)
+    except Exception as e:
+        errors.append(f"Cannot evaluate expression '{expr_str}': {e}")
+        return "error", False, errors, None
+
+    # 5. Check based on whether all numbers are used
+    all_used = len(unused) == 0
+
+    if all_used:
+        # Full expression: must equal 24
+        if not is_close(value, 24):
+            errors.append(
+                f"Expression '{expr_str}' evaluates to {fmt(value)}, not 24."
+            )
+            return "error", False, errors, None
+        # Valid complete solution!
+        return "complete", True, [], []
+    else:
+        # Partial expression: check if remaining numbers + result can reach 24
+        remaining = [value] + unused
+        can_reach, example = can_reach_24(remaining)
+        if not can_reach:
+            remaining_str = [fmt(n) for n in remaining]
+            errors.append(
+                f"Expression '{expr_str}' evaluates to {fmt(value)}. "
+                f"Remaining numbers (including result) are {remaining_str}. "
+                f"Cannot reach 24 from these numbers. This is a dead end."
+            )
+            return "error", False, errors, None
+        # Partial but reachable -- valid
+        return "partial", True, [], unused
 
 
 class ThinkingPhaseStepVerifierGame24Monitor(VerifyMonitor):
     """
-    Monitor that adds thinking-phase verification on top of the standard
-    StepVerifierGame24Monitor behaviour.
+    Monitor that verifies Game-of-24 expressions during and after thinking.
 
-    During thinking: every N newlines -> force ``</think>`` + structured
-        prompt, stream from vLLM, verify.  Roll back on error, commit on
-        success.
+    During thinking: every N double-newlines (after warmup) -> fork a
+        side-stream asking for the current expression, verify it, and
+        give appropriate feedback.
 
-    After natural ``</think>``: inject the same structured prompt, then
-        verify each step (identical to StepVerifierGame24Monitor).
+    After natural ``</think>``: inject expression prompt, verify the
+        final answer.
     """
 
     def __init__(
@@ -93,6 +216,7 @@ class ThinkingPhaseStepVerifierGame24Monitor(VerifyMonitor):
         max_corrections: int = 5,
         answer_start_token: str = "</think>",
         async_execution: bool = True,
+        warmup_newlines: int = 0,
     ):
         super().__init__(name)
         self.original_numbers = [float(x) for x in original_numbers]
@@ -102,142 +226,121 @@ class ThinkingPhaseStepVerifierGame24Monitor(VerifyMonitor):
         self.max_corrections = max_corrections
         self.answer_start_token = answer_start_token
         self.async_execution = async_execution
+        self.warmup_newlines = warmup_newlines
 
-        # ---- thinking-phase state ----
+        # ---- state ----
         self._think_phase_corrections = 0
+        self._verified_expression = None  # set by Phase 1 early-stop
 
     # ------------------------------------------------------------------
     #  helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _fmt(n: float) -> str:
+        if abs(n - round(n)) < 1e-9:
+            return str(int(round(n)))
+        return f"{n:.4f}".rstrip('0').rstrip('.')
+
     def _count_feedback_blocks(self, text: str) -> int:
         return len(re.findall(r'\[VERIFIER FEEDBACK[^\]]*\]', text))
 
     def _is_in_thinking_phase(self, generated_text: str) -> bool:
         return self.answer_start_token not in generated_text
 
-    # ------------------------------------------------------------------
-    #  _get_current_available / _extract_last_step_info
-    #  (identical to StepVerifierGame24Monitor)
-    # ------------------------------------------------------------------
-    def _get_current_available(self, generated_text: str) -> List[float]:
-        if self.answer_start_token not in generated_text:
-            return self.original_numbers.copy()
+    @staticmethod
+    def _extract_braced_expression(text: str) -> Optional[str]:
+        """Extract the first expression wrapped in { } from *text*.
 
-        text_after_think = generated_text.split(self.answer_start_token)[-1]
-
-        step_pattern = re.compile(
-            r'>\s*Step\s*(\d+)\s*\n'
-            r'available\s+numbers?\s*:\s*\[([^\]]+)\]\s*\n'
-            r'suggested\s+operation\s*:\s*([^\n]+?)\s*\n'
-            r'remaining\s+numbers?\s*:\s*\[([^\]]+)\]',
-            re.IGNORECASE,
-        )
-
-        sections = re.split(
-            r'\[VERIFIER FEEDBACK[^\]]*\]\s*', text_after_think, flags=re.DOTALL
-        )
-        last_section = sections[-1]
-        steps_in_last_section = list(step_pattern.finditer(last_section))
-
-        if not steps_in_last_section:
-            return self.original_numbers.copy()
-
-        last_step = steps_in_last_section[-1]
-        step_num_to_verify = int(last_step.group(1))
-
-        if step_num_to_verify == 1:
-            return self.original_numbers.copy()
-
-        target_step = step_num_to_verify - 1
-
-        for step_match in steps_in_last_section[:-1]:
-            if int(step_match.group(1)) == target_step:
-                try:
-                    return [
-                        float(x.strip())
-                        for x in step_match.group(4).strip().split(',')
-                        if x.strip()
-                    ]
-                except Exception:
-                    pass
-
-        for section in reversed(sections[:-1]):
-            for step_match in reversed(list(step_pattern.finditer(section))):
-                if int(step_match.group(1)) == target_step:
-                    try:
-                        return [
-                            float(x.strip())
-                            for x in step_match.group(4).strip().split(',')
-                            if x.strip()
-                        ]
-                    except Exception:
-                        pass
-
-        return self.original_numbers.copy()
-
-    def _extract_last_step_info(self, generated_text: str):
-        if self.answer_start_token not in generated_text:
-            return None, None
-
-        text_after_think = generated_text.split(self.answer_start_token)[-1]
-        sections = re.split(
-            r'\[VERIFIER FEEDBACK[^\]]*\]\s*', text_after_think, flags=re.DOTALL
-        )
-        text = sections[-1]
-
-        step_pattern = re.compile(
-            r'(>\s*Step\s*(\d+)\s*\n'
-            r'available\s+numbers?\s*:\s*\[([^\]]+)\]\s*\n'
-            r'suggested\s+operation\s*:\s*([^\n]+?)\s*\n'
-            r'remaining\s+numbers?\s*:\s*\[([^\]]+)\])',
-            re.IGNORECASE,
-        )
-        all_steps = list(step_pattern.finditer(text))
-        if not all_steps:
-            return None, None
-
-        last_step = all_steps[-1]
-        step_num = int(last_step.group(2))
-        step_text = (
-            f">Step{step_num}\n"
-            f"available numbers: [{last_step.group(3).strip()}]\n"
-            f"suggested operation: {last_step.group(4).strip()}\n"
-            f"remaining numbers: [{last_step.group(5).strip()}]"
-        )
-        return step_num, parse_step(step_text)
-
-    def _count_complete_steps(self, text: str) -> int:
-        """Return how many complete step blocks are in the text."""
-        step_pattern = re.compile(
-            r'>\s*Step\s*\d+\s*\n'
-            r'available\s+numbers?\s*:\s*\[([^\]]+)\]\s*\n'
-            r'suggested\s+operation\s*:\s*([^\n]+?)\s*\n'
-            r'remaining\s+numbers?\s*:\s*\[([^\]]+)\]',
-            re.IGNORECASE,
-        )
-        return len(step_pattern.findall(text))
-
-    # ------------------------------------------------------------------
-    #  _stream_and_verify_steps
-    # ------------------------------------------------------------------
-    async def _stream_and_verify_steps(self, text_so_far: str):
+        Handles nested braces so that e.g. ``{(3+5)*7}`` is extracted correctly.
         """
-        Stream from the vLLM server with ``prompt + text_so_far`` (which
-        already ends with the structured output prompt).
+        start = text.find('{')
+        if start == -1:
+            return None
+        brace_count = 0
+        end = start
+        while end < len(text):
+            if text[end] == '{':
+                brace_count += 1
+            elif text[end] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    break
+            end += 1
+        if brace_count != 0:
+            return None
+        expr = text[start + 1:end].strip()
+        if not expr:
+            return None
+        # Basic cleanup: remove LaTeX
+        expr = expr.replace(r'\times', '*').replace(r'\cdot', '*').replace(r'\div', '/')
+        expr = expr.replace(r'\,', '').replace(r'\ ', '')
+        frac_pattern = r"\\frac\{([^{}]+)\}\{([^{}]+)\}"
+        while re.search(frac_pattern, expr):
+            expr = re.sub(frac_pattern, r"(\1/\2)", expr)
+        # Handle implicit multiplication
+        expr = re.sub(r'\)\s*\(', ')*(', expr)
+        expr = re.sub(r'\)\s*(\d)', r')*\1', expr)
+        expr = re.sub(r'(\d)\s*\(', r'\1*(', expr)
+        return expr
 
-        As each complete step block appears, verify it immediately.
-        - If a step is WRONG -> stop streaming, return the error info.
-        - If all steps pass and the model finishes -> return full text.
+    @staticmethod
+    def _extract_boxed_expression(text: str) -> Optional[str]:
+        """Extract expression from \\boxed{...} in text."""
+        boxed_pattern = r"\\boxed\{"
+        matches = list(re.finditer(boxed_pattern, text))
+        if not matches:
+            return None
+        last_match = matches[-1]
+        start = last_match.end()
+        brace_count = 1
+        end = start
+        while end < len(text) and brace_count > 0:
+            if text[end] == '{':
+                brace_count += 1
+            elif text[end] == '}':
+                brace_count -= 1
+            end += 1
+        expr = text[start:end - 1].strip()
+        expr = expr.replace(r'\times', '*').replace(r'\cdot', '*').replace(r'\div', '/')
+        expr = expr.replace(r'\,', '').replace(r'\ ', '')
+        frac_pattern = r"\\frac\{([^{}]+)\}\{([^{}]+)\}"
+        while re.search(frac_pattern, expr):
+            expr = re.sub(frac_pattern, r"(\1/\2)", expr)
+        expr = re.sub(r'\)\s*\(', ')*(', expr)
+        expr = re.sub(r'\)\s*(\d)', r')*\1', expr)
+        expr = re.sub(r'(\d)\s*\(', r'\1*(', expr)
+        return expr
 
-        Returns:
-            (full_text, is_all_valid, error_info_or_None)
+    # ------------------------------------------------------------------
+    #  _side_stream_expression  (streams ~20 tokens to get {expr})
+    # ------------------------------------------------------------------
+    async def _side_stream_expression(self, text_so_far: str, max_new_tokens: int = 20) -> Optional[str]:
         """
+        Send ``prompt + text_so_far`` to vLLM, stream at most
+        *max_new_tokens* tokens, and try to extract an expression from
+        the output that appears inside ``{ }``.
+
+        ``text_so_far`` is expected to end with something like
+        ``</think>\\nThe expression that I found till now is {``
+        so the model just needs to output the expression body and ``}``.
+
+        Returns the extracted expression string, or None.
+        """
+        fmt = self._fmt
+        nums_str = ", ".join(fmt(n) for n in self.original_numbers)
+        logger.info(
+            f"[Side-stream] Starting expression extraction\n"
+            f"  Original numbers : [{nums_str}]\n"
+            f"  Max new tokens   : {max_new_tokens}"
+        )
+
         payload = deepcopy(self.llm_server["payload"])
         payload["prompt"] = self.prompt + text_so_far
-        payload["max_tokens"] = min(payload.get("max_tokens", 2048), 2048)
+        payload["max_tokens"] = max_new_tokens
+        # We don't need logprobs for the side-stream
+        payload.pop("logprobs", None)
 
         generated = ""
-        last_verified_step_count = 0
 
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(
@@ -253,74 +356,55 @@ class ThinkingPhaseStepVerifierGame24Monitor(VerifyMonitor):
                             break
                         chunk = json.loads(data)["choices"][0]["text"]
                         generated += chunk
-                        logger.debug(f"[vLLM side-stream] chunk: {chunk!r}")
+                        logger.debug(f"[Side-stream] chunk: {chunk!r}")
 
-                        # Check if a new complete step appeared
-                        current_step_count = self._count_complete_steps(generated)
-                        if current_step_count > last_verified_step_count:
-                            full_text = text_so_far + generated
-                            step_num, parsed = self._extract_last_step_info(full_text)
+                        # As soon as we see '}', we have the expression
+                        if '}' in generated:
+                            break
 
-                            if (step_num is not None
-                                    and parsed is not None
-                                    and parsed.get('available_numbers') is not None):
-                                current_available = self._get_current_available(full_text)
-                                is_valid, errors, new_available = verify_step(
-                                    parsed, current_available,
-                                    self.original_numbers, step_num,
-                                )
-
-                                if not is_valid:
-                                    logger.info(
-                                        f"[ThinkingPhaseVerifier] Side-stream: "
-                                        f"Step {step_num} FAILED: {errors}"
-                                    )
-                                    return (
-                                        full_text,
-                                        False,
-                                        {"step_num": step_num,
-                                         "errors": errors,
-                                         "available": current_available},
-                                    )
-                                else:
-                                    logger.info(
-                                        f"[ThinkingPhaseVerifier] Side-stream: "
-                                        f"Step {step_num} verified OK"
-                                    )
-
-                            last_verified_step_count = current_step_count
-
-        full_text = text_so_far + generated
-        logger.info(
-            f"[ThinkingPhaseVerifier] Side-stream finished. "
-            f"Generated {len(generated)} chars, "
-            f"{last_verified_step_count} steps verified."
-        )
-        return full_text, True, None
+        # The model was prompted with "{ " so its output completes the brace.
+        # We wrap it back so _extract_braced_expression can parse it.
+        full_text = "{" + generated
+        expr = self._extract_braced_expression(full_text)
+        if expr:
+            logger.info(f"[Side-stream] Extracted expression: {expr}")
+        else:
+            logger.info(
+                f"[Side-stream] No expression found in side-stream "
+                f"(generated {len(generated)} chars: {generated!r})"
+            )
+        return expr
 
     # ------------------------------------------------------------------
-    #  step_extractor
+    #  step_extractor -- decides WHEN to trigger verification
     # ------------------------------------------------------------------
     def step_extractor(self, chunk: str, generated_text: str):
         """
-        Phase 1 (thinking): trigger when total newlines cross the next
-            multiple of ``newline_threshold``.
-        Phase 2 (after </think>): trigger when a natural ``</think>``
-            is detected (to inject the structured prompt), or when a
-            complete step block appears (for verification).
+        Phase 1 (thinking): trigger when total double-newlines cross the
+            next multiple of ``newline_threshold`` (after warmup).
+        Phase 2 (after </think>): trigger to inject the expression prompt,
+            or when a ``{expression}`` or ``\\boxed{expression}`` appears.
         """
         # ===== PHASE 1: still inside <think> =====
         if self._is_in_thinking_phase(generated_text):
             if self._think_phase_corrections >= self.max_corrections:
                 return False, None
 
-            total_newlines = generated_text.count('\n')
+            total_double_newlines = generated_text.count('\n\n')
 
-            if chunk.endswith('\n') and total_newlines > 0 and total_newlines % self.newline_threshold == 0:
+            # Skip until warmup period is reached
+            if total_double_newlines < self.warmup_newlines:
+                return False, None
+
+            # After warmup, trigger at every newline_threshold multiple
+            past_warmup = total_double_newlines - self.warmup_newlines
+            if (generated_text.endswith('\n\n')
+                    and past_warmup >= 0
+                    and past_warmup % self.newline_threshold == 0):
                 logger.info(
-                    f"[ThinkingPhaseVerifier] Total newlines={total_newlines}, "
-                    f"hit multiple of N={self.newline_threshold}. "
-                    f"Forcing step generation."
+                    f"[step_extractor] Phase 1 trigger: \\n\\n count={total_double_newlines} "
+                    f"(warmup={self.warmup_newlines}, past_warmup={past_warmup}, "
+                    f"threshold={self.newline_threshold})"
                 )
                 return True, generated_text
 
@@ -328,151 +412,166 @@ class ThinkingPhaseStepVerifierGame24Monitor(VerifyMonitor):
 
         # ===== PHASE 2: after </think> =====
 
-        # Sub-case 2a: </think> is present but structured prompt is not
-        # -> trigger so verify() can inject it.
-        if STRUCTURED_OUTPUT_PROMPT not in generated_text:
+        # 2a: </think> present but we haven't injected the expression prompt yet
+        if FINAL_EXPRESSION_PROMPT.strip() not in generated_text:
             logger.info(
-                "[ThinkingPhaseVerifier] </think> present but structured "
-                "output prompt missing - will inject it."
+                "[step_extractor] Phase 2a: </think> detected, "
+                "expression prompt not yet injected."
             )
             return True, generated_text
 
-        # Sub-case 2b: structured prompt already injected -> detect
-        # complete steps for verification (same as StepVerifierGame24Monitor).
+        # 2b: expression prompt was injected (ends with "\boxed").
+        #     The model should complete it with "{expression}".
+        #     Trigger once we see a complete \boxed{...} (with closing brace).
         think_end_pos = generated_text.find(self.answer_start_token) + len(self.answer_start_token)
         text_after_think = generated_text[think_end_pos:]
 
+        # Look past any previous feedback blocks
         feedback_pattern = re.compile(r'\[VERIFIER FEEDBACK[^\]]*\]\s*', re.DOTALL)
         last_feedback_end = 0
         for match in feedback_pattern.finditer(text_after_think):
             last_feedback_end = match.end()
-
         text = text_after_think[last_feedback_end:]
-        text_start_in_generated = think_end_pos + last_feedback_end
 
-        step_pattern = re.compile(
-            r'(>\s*Step\s*(\d+)\s*\n'
-            r'available\s+numbers?\s*:\s*\[([^\]]+)\]\s*\n'
-            r'suggested\s+operation\s*:\s*([^\n]+?)\s*\n'
-            r'remaining\s+numbers?\s*:\s*\[([^\]]+)\])',
-            re.IGNORECASE,
-        )
-        all_steps = list(step_pattern.finditer(text))
-        if not all_steps:
-            return False, None
+        has_boxed = re.search(r'\\boxed\{[^}]+\}', text)
+        if has_boxed:
+            return True, generated_text
 
-        last_complete_step = all_steps[-1]
-
-        # Already moved past this step?
-        text_after_last_step = text[last_complete_step.end():]
-        if re.search(r'>\s*Step\s*\d+', text_after_last_step, re.IGNORECASE):
-            return False, None
-
-        end_pos = text_start_in_generated + last_complete_step.end()
-        return True, generated_text[:end_pos]
+        return False, None
 
     # ------------------------------------------------------------------
     #  verify
     # ------------------------------------------------------------------
     async def verify(self, step: str, token_index: int, event, event_info):
         """
-        Case 1 - still in thinking (no </think> in step):
-            Inject </think> + structured prompt, stream from vLLM to get
-            steps, verify them, then either rollback (wrong) or commit
-            (correct).
+        Case 1 -- still in thinking (no </think> in step):
+            Inject ``</think> The expression that I found till now is {``,
+            stream ~20 tokens, extract the expression, verify it.
+            - Error -> feedback ``Wait, <error>.``
+            - Correct & complete -> inject early-stop message
+            - Correct & partial -> do nothing, let model keep thinking
 
-        Case 2a - natural </think> just appeared, structured prompt not
+        Case 2a -- natural </think> just appeared, expression prompt not
             yet injected:
-            Signal fix() to append the structured output prompt.
+            Signal fix() to append the expression prompt.
 
-        Case 2b - after </think> + structured prompt already injected:
-            Identical to StepVerifierGame24Monitor - verify each step.
+        Case 2b -- after </think> + expression prompt already injected:
+            Verify the expression from the model's output.
         """
 
         # ==================================================================
-        # CASE 1: Thinking phase
+        # CASE 1: Thinking phase -- side-stream expression verification
         # ==================================================================
         if self.answer_start_token not in step:
+            total_dn = step.count('\n\n')
             logger.info(
-                "[ThinkingPhaseVerifier] Injecting </think> + structured "
-                "prompt and streaming steps from vLLM inside verify()"
+                f"[Phase 1] Thinking-phase verification triggered\n"
+                f"  \\n\\n count  : {total_dn}\n"
+                f"  Thinking len : {len(step)} chars"
             )
 
-            # Build text with injected </think> + structured prompt
-            text_with_think_end = (
-                step + "\n" + self.answer_start_token + "\n"
-                + STRUCTURED_OUTPUT_PROMPT + "\n"
-            )
+            # Build text with injected prompt for expression extraction
+            text_with_prompt = step + "\n" + THINKING_PHASE_EXPRESSION_PROMPT
 
-            # Stream from vLLM, verifying each step as it appears
-            full_text, is_all_valid, error_info = await self._stream_and_verify_steps(
-                text_with_think_end
-            )
+            # Side-stream: get expression from the model (~20 tokens)
+            expr_str = await self._side_stream_expression(text_with_prompt, max_new_tokens=20)
 
-            if is_all_valid:
-                # All steps correct -> inject </think> + structured prompt
-                # and let stream_completion recurse so the model generates
-                # verified steps that Phase 2b checks.
+            if expr_str is None:
+                # Model didn't produce a parseable expression -- let it keep thinking
                 logger.info(
-                    "[ThinkingPhaseVerifier] All side-streamed steps verified OK "
-                    "- injecting </think> + structured prompt"
+                    "[Phase 1] No expression extracted from side-stream. "
+                    "Letting model continue thinking."
                 )
-                if not event.is_set():
-                    event_info["generated_text"] = step
-                    event_info["feedback"] = self.answer_start_token
-                    event_info["correction_index"] = token_index
-                    event_info["phase"] = "inject_think_end"
-                    event.set()
-                return step, self.answer_start_token
+                return step, None
 
-            else:
-                # Step is WRONG -> rollback into thinking
-                errors = error_info["errors"]
-                step_num = error_info["step_num"]
-                logger.info(
-                    f"[ThinkingPhaseVerifier] Step {step_num} FAILED: {errors}"
-                )
+            # Verify the extracted expression
+            status, is_valid, errors, unused = verify_expression(
+                expr_str, self.original_numbers
+            )
+
+            if not is_valid:
+                # ---- WRONG: inject error feedback into thinking trace ----
                 error_summary = "; ".join(errors)
+                self._think_phase_corrections += 1
+                logger.info(
+                    f"[Phase 1] INVALID expression '{expr_str}'\n"
+                    f"  Error(s) : {error_summary}\n"
+                    f"  Action   : Inject feedback into thinking trace\n"
+                    f"  Corrections: {self._think_phase_corrections}/{self.max_corrections}"
+                )
                 thinking_feedback = (
-                    f"\n\nWait, that approach is wrong. {error_summary}. "
-                    f"Let me reconsider and try a different approach.\n"
+                    f"\n\nWait, the expression {expr_str} does not work. "
+                    f"{error_summary} "
+                    f"I must NOT reuse {expr_str} or any expression I have already tried. "
+                    f"Let me try a completely different combination of "
+                    f"operations and grouping of numbers.\n"
                 )
                 if not event.is_set():
                     event_info["generated_text"] = step
                     event_info["feedback"] = thinking_feedback
                     event_info["correction_index"] = token_index
                     event_info["errors"] = errors
-                    event_info["failed_step"] = step_num
                     event_info["phase"] = "rollback_to_thinking"
                     event.set()
                 return step, thinking_feedback
 
+            elif status == "complete":
+                # ---- CORRECT & COMPLETE: early-stop, push to answer ----
+                self._verified_expression = expr_str
+                logger.info(
+                    f"[Phase 1] VALID COMPLETE expression '{expr_str}' == 24\n"
+                    f"  Action: Inject early-stop message and transition to answer."
+                )
+                early_stop_msg = (
+                    f"\n\nWait, the expression {expr_str} has been verified "
+                    f"to equal 24 using all the given numbers. This will be "
+                    f"my final answer.\n{self.answer_start_token}\n"
+                )
+                if not event.is_set():
+                    event_info["generated_text"] = step
+                    event_info["feedback"] = early_stop_msg
+                    event_info["correction_index"] = token_index
+                    event_info["phase"] = "early_stop_answer"
+                    event_info["verified_expression"] = expr_str
+                    event.set()
+                return step, early_stop_msg
+
+            else:
+                # ---- CORRECT & PARTIAL: let model keep thinking ----
+                unused_str = (
+                    "[" + ", ".join(self._fmt(n) for n in unused) + "]"
+                    if unused else "[]"
+                )
+                logger.info(
+                    f"[Phase 1] VALID PARTIAL expression '{expr_str}'\n"
+                    f"  Unused numbers: {unused_str}\n"
+                    f"  Action: No error, let model keep thinking."
+                )
+                return step, None
+
         # ==================================================================
-        # CASE 2a: </think> present but structured prompt missing
+        # CASE 2a: </think> present but expression prompt not yet injected
         # ==================================================================
-        if STRUCTURED_OUTPUT_PROMPT not in step:
+        if FINAL_EXPRESSION_PROMPT.strip() not in step:
             logger.info(
-                "[ThinkingPhaseVerifier] </think> present but structured "
-                "prompt missing -> injecting it"
+                "[Phase 2a] Natural </think> detected. "
+                "Injecting expression extraction prompt."
             )
-            structured_prompt_text = "\n" + STRUCTURED_OUTPUT_PROMPT + "\n"
+            prompt_text = FINAL_EXPRESSION_PROMPT
             if not event.is_set():
                 event_info["generated_text"] = step
-                event_info["feedback"] = structured_prompt_text
+                event_info["feedback"] = prompt_text
                 event_info["correction_index"] = token_index
-                event_info["phase"] = "inject_structured_prompt"
+                event_info["phase"] = "inject_expression_prompt"
                 event.set()
-            return step, structured_prompt_text
+            return step, prompt_text
 
         # ==================================================================
-        # CASE 2b: After </think> + structured prompt - standard verify
+        # CASE 2b: After </think> + expression prompt -- verify final answer
         # ==================================================================
 
-        # ---- max-corrections guard ----
-        num_corrections = (
-            self._count_feedback_blocks(step)
-            + self._think_phase_corrections
-        )
+        # Max-corrections guard
+        num_corrections = self._count_feedback_blocks(step)
         if num_corrections >= self.max_corrections:
             fb = "\nthe answer is \\boxed{no solution}"
             if not event.is_set():
@@ -480,32 +579,75 @@ class ThinkingPhaseStepVerifierGame24Monitor(VerifyMonitor):
                 event_info["feedback"] = fb
                 event_info["correction_index"] = token_index
                 event_info["errors"] = ["Max corrections reached"]
-                event_info["failed_step"] = None
+                event_info["phase"] = "standard_verify"
                 event.set()
             return step, fb
 
-        # ---- extract & verify step ----
-        step_num, parsed = self._extract_last_step_info(step)
-        if step_num is None or parsed is None or parsed.get('available_numbers') is None:
+        # Extract expression from \boxed{...} — only look at text after
+        # the last feedback block to avoid re-extracting old expressions.
+        think_end_pos = step.find(self.answer_start_token) + len(self.answer_start_token)
+        text_after_think = step[think_end_pos:]
+        feedback_pattern = re.compile(r'\[VERIFIER FEEDBACK[^\]]*\]\s*', re.DOTALL)
+        last_feedback_end = 0
+        for match in feedback_pattern.finditer(text_after_think):
+            last_feedback_end = match.end()
+        recent_text = text_after_think[last_feedback_end:]
+
+        expr_str = self._extract_boxed_expression(recent_text)
+        if expr_str is not None:
+            logger.info(f"[Phase 2b] Extracted expression from \\boxed: '{expr_str}'")
+
+        if expr_str is None:
             return step, None
 
-        current_available = self._get_current_available(step)
-        is_valid, errors, new_available = verify_step(
-            parsed, current_available, self.original_numbers, step_num
+        # Verify the final expression (must use all 4 numbers and equal 24)
+        status, is_valid, errors, unused = verify_expression(
+            expr_str, self.original_numbers
         )
 
-        if is_valid:
+        if is_valid and status == "complete":
+            logger.info(f"[Phase 2b] Final expression '{expr_str}' is correct (= 24)")
+            # Signal STOP so the model doesn't keep generating
+            if not event.is_set():
+                event_info["generated_text"] = step
+                event_info["feedback"] = ""  # nothing to append
+                event_info["correction_index"] = token_index
+                event_info["phase"] = "final_answer_correct"
+                event_info["verified_expression"] = expr_str
+                event.set()
             return step, None
 
-        # ---- step has errors -> standard feedback ----
-        logger.info(f"[ThinkingPhaseVerifier] Step {step_num} FAILED: {errors}")
-        feedback = format_feedback(errors, step_num, current_available)
+        # Build error messages for partial/wrong answers in phase 2
+        if is_valid and status == "partial":
+            # In phase 2 (after </think>) we need ALL numbers used
+            used_numbers = _extract_numbers_from_expr(expr_str)
+            errors = [
+                f"Expression '{expr_str}' only uses {len(used_numbers)} of "
+                f"{len(self.original_numbers)} numbers. After </think>, "
+                f"a COMPLETE expression using ALL numbers is required."
+            ]
+
+        if not errors:
+            errors = [f"Expression '{expr_str}' is not a valid solution."]
+
+        error_summary = "; ".join(errors)
+        logger.info(f"[Phase 2b] Final expression FAILED: {error_summary}")
+
+        orig_display = [int(n) if n == int(n) else n for n in self.original_numbers]
+        nums_str = ", ".join(str(n) for n in orig_display)
+        feedback = (
+            f"\n[VERIFIER FEEDBACK:\n"
+            f"  The expression {expr_str} is incorrect. {error_summary}\n"
+            f"  Do NOT reuse {expr_str} or any previously tried expression.\n"
+            f"  Try a completely different approach. Use ALL four numbers "
+            f"{nums_str} exactly once, "
+            f"evaluating to 24. Wrap in \\boxed{{}}. ]\n"
+        )
         if not event.is_set():
             event_info["generated_text"] = step
             event_info["feedback"] = feedback
             event_info["correction_index"] = token_index
             event_info["errors"] = errors
-            event_info["failed_step"] = step_num
             event_info["phase"] = "standard_verify"
             event.set()
         return step, feedback
@@ -517,57 +659,863 @@ class ThinkingPhaseStepVerifierGame24Monitor(VerifyMonitor):
         """
         Applies the appropriate fix depending on the phase:
 
-        inject_think_end
-            Append ``</think>`` + structured output prompt so the model
-            regenerates the steps naturally.
-
-        rollback_to_thinking
-            Strip everything from the inject point, append ``Wait ...``
-            feedback inside the thinking trace.
-
-        inject_structured_prompt
-            Append the structured output prompt after a natural
-            ``</think>`` (no rollback needed).
-
-        standard_verify
-            Append ``[VERIFIER FEEDBACK ...]`` (same as
-            StepVerifierGame24Monitor).
+        - ``rollback_to_thinking``: Append error feedback into thinking trace.
+        - ``early_stop_answer``: Append early-stop message + </think> to
+          transition the model to answer generation.
+        - ``inject_expression_prompt``: Append expression prompt after </think>.
+        - ``standard_verify``: Append [VERIFIER FEEDBACK ...].
         """
         phase = event_info.get("phase", "standard_verify")
 
-        if phase == "inject_think_end":
-            logger.info(
-                "[ThinkingPhaseVerifier] fix(): injecting </think> + "
-                "structured prompt"
-            )
-            return (
-                event_info["generated_text"]
-                + "\n" + self.answer_start_token + "\n"
-                + STRUCTURED_OUTPUT_PROMPT + "\n"
-            )
-
         if phase == "rollback_to_thinking":
-            logger.info("[ThinkingPhaseVerifier] fix(): rolling back into thinking")
-
             base_text = event_info["generated_text"]
             result = base_text.rstrip() + event_info["feedback"]
-
-            # Reset thinking-phase state for the next cycle
-            self._think_phase_corrections += 1
-
             logger.info(
-                f"[ThinkingPhaseVerifier] Rolled back. "
-                f"Think-phase corrections: {self._think_phase_corrections}/{self.max_corrections}"
+                f"[fix] Phase: rollback_to_thinking\n"
+                f"  -> Appended error feedback into <think> trace.\n"
+                f"  -> Think-phase corrections: {self._think_phase_corrections}/{self.max_corrections}"
+            )
+            return result
+
+        if phase == "early_stop_answer":
+            base_text = event_info["generated_text"]
+            result = base_text.rstrip() + event_info["feedback"]
+            logger.info(
+                f"[fix] Phase: early_stop_answer\n"
+                f"  -> Verified expression passed. Injecting early-stop + </think>.\n"
+                f"  -> Model will now generate the final answer."
+            )
+            return result
+
+        if phase == "final_answer_correct":
+            expr = event_info.get("verified_expression", "?")
+            logger.info(
+                f"[fix] Phase: final_answer_correct\n"
+                f"  -> Final expression '{expr}' verified correct. Stopping generation."
+            )
+            return event_info["generated_text"]
+
+        if phase == "inject_expression_prompt":
+            logger.info(
+                f"[fix] Phase: inject_expression_prompt\n"
+                f"  -> Natural </think> detected.\n"
+                f"  -> Appending expression extraction prompt."
+            )
+            return event_info["generated_text"] + event_info["feedback"]
+
+        # standard_verify
+        errors = event_info.get("errors", [])
+        error_summary = "; ".join(errors) if errors else "unknown"
+        logger.info(
+            f"[fix] Phase: standard_verify\n"
+            f"  -> Expression failed: {error_summary}\n"
+            f"  -> Appending [VERIFIER FEEDBACK] so model retries."
+        )
+        return event_info["generated_text"] + event_info["feedback"]
+
+
+# =====================================================================
+#  Maze Thinking-Phase Prompts
+# =====================================================================
+
+
+def _build_maze_format_block(question_type: str) -> str:
+    """
+    Build the <format>...</format> block that describes the structured
+    output template.  Re-used by both the side-stream (Phase 1) and
+    the post-</think> injection (Phase 2a).
+    """
+    if question_type == "relative_position":
+        return (
+            "<format>\n"
+            ">>> LOCATE START AND EXIT:\n"
+            "    S position: (row, col)\n"
+            "    E position: (row, col)\n"
+            "\n"
+            ">>> COMPARE POSITIONS:\n"
+            "    Row comparison: E row (r) vs S row (r) → E is ABOVE/BELOW S\n"
+            "    Col comparison: E col (c) vs S col (c) → E is LEFT/RIGHT of S\n"
+            "\n"
+            ">>> FINAL ANSWER:\n"
+            "    \\boxed{LETTER}\n"
+            "</format>"
+        )
+    else:
+        count_line = "    Running count: Right=0, Left=0"
+        if question_type == "total_turns":
+            count_line = "    Running count: Right=0, Left=0, Total=0"
+
+        return (
+            "<format>\n"
+            ">>> LOCATE START AND EXIT:\n"
+            "    S position: (row, col)\n"
+            "    E position: (row, col)\n"
+            "\n"
+            ">>> STEP 1: Move DOWN from (r1, c1) to (r2, c2)\n"
+            "    Current position: (r2, c2)\n"
+            "    Previous direction: —\n"
+            "    Current direction: DOWN\n"
+            "    Turn type: STRAIGHT\n"
+            f"{count_line}\n"
+            "\n"
+            "[... continue for all steps until reaching E ...]\n"
+            "\n"
+            ">>> FINAL ANSWER:\n"
+            "    \\boxed{LETTER}\n"
+            "</format>"
+        )
+
+
+def _build_maze_thinking_phase_prompt(question_type: str) -> str:
+    """
+    Build the side-stream prompt injected during the thinking phase.
+
+    Written in the LLM's own first-person thinking voice so it blends
+    naturally with the ``<think>`` trace.  Includes the ``<format>``
+    block and the starting marker so the model begins filling in.
+    """
+    format_block = _build_maze_format_block(question_type)
+    return (
+        "\n\nLet me output the current steps I have traced so far "
+        "through the maze in the following format:\n"
+        f"{format_block}\n"
+        ">>> LOCATE START AND EXIT:\n"
+    )
+
+
+def _build_maze_structured_prompt(question_type: str) -> str:
+    """
+    Build the structured format prompt injected after </think>.
+
+    This is analogous to Game24's step format injection — it gives the
+    model a template to fill in so we can parse and verify each step.
+    Written in the LLM's own voice so it reads naturally.
+    """
+    format_block = _build_maze_format_block(question_type)
+    return (
+        "\nLet me trace the step by step solution through the maze "
+        "in the following format:\n"
+        f"{format_block}\n"
+        ">>> LOCATE START AND EXIT:\n"
+    )
+
+
+# =====================================================================
+#  ThinkingPhaseStepVerifierMazeMonitor
+# =====================================================================
+
+class ThinkingPhaseStepVerifierMazeMonitor(VerifyMonitor):
+    """
+    Monitor that verifies maze path-tracing during and after thinking.
+
+    **No meta-prompt required** — works with a plain user prompt containing
+    just the maze and question.  Structure is injected by this monitor
+    after ``</think>`` (natural or early-stop), exactly like Game24
+    injects its step format.
+
+    Phase 1 – During ``<think>...</think>``:
+        Every N double-newlines (after warmup), fork a side-stream that
+        injects ``</think>`` + a structured step prompt, stream ~300
+        tokens, parse and verify each step against the maze grid.
+
+    Phase 2a – ``</think>`` detected, structured prompt not yet injected:
+        Inject the structured step-by-step format template so the model
+        fills it in (LOCATE → STEPs → FINAL ANSWER → ``\\boxed{}``).
+
+    Phase 2b – Structured prompt injected, model is generating:
+        Verify each completed step as it appears.  Once ``\\boxed{}``
+        appears, signal completion.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        grid: list,
+        start_pos: tuple,
+        exit_pos: tuple,
+        llm_server: dict,
+        prompt: str,
+        question_type: str = "right_turns",
+        newline_threshold: int = 10,
+        max_corrections: int = 5,
+        answer_start_token: str = "</think>",
+        async_execution: bool = True,
+        warmup_newlines: int = 0,
+    ):
+        super().__init__(name)
+        self.grid = grid
+        self.start_pos = start_pos
+        self.exit_pos = exit_pos
+        self.llm_server = llm_server
+        self.prompt = prompt
+        self.question_type = question_type
+        self.newline_threshold = newline_threshold
+        self.max_corrections = max_corrections
+        self.answer_start_token = answer_start_token
+        self.async_execution = async_execution
+        self.warmup_newlines = warmup_newlines
+
+        # Build the structured prompt that will be injected after </think>
+        self._structured_prompt = _build_maze_structured_prompt(question_type)
+        # Build the thinking-phase side-stream prompt (in LLM's own voice)
+        self._thinking_phase_prompt = _build_maze_thinking_phase_prompt(question_type)
+        # A unique marker to detect whether we already injected it
+        self._structured_marker = ">>> LOCATE START AND EXIT:"
+
+        # ---- state ----
+        self._think_phase_corrections = 0
+        self._verified_path_complete = False  # True if path reaches E
+
+    # ------------------------------------------------------------------
+    #  helpers
+    # ------------------------------------------------------------------
+    def _count_feedback_blocks(self, text: str) -> int:
+        return len(re.findall(r'\[VERIFIER FEEDBACK[^\]]*\]', text))
+
+    def _is_in_thinking_phase(self, generated_text: str) -> bool:
+        return self.answer_start_token not in generated_text
+
+    def _structured_prompt_injected(self, generated_text: str) -> bool:
+        """Check if structured format was already injected after </think>."""
+        if self.answer_start_token not in generated_text:
+            return False
+        after_think = generated_text.split(self.answer_start_token, 1)[1]
+        return self._structured_marker in after_think
+
+    @staticmethod
+    def detect_question_type(prompt: str) -> str:
+        """Auto-detect question type from prompt text."""
+        prompt_lower = prompt.lower()
+        if "right turn" in prompt_lower or "right-turn" in prompt_lower:
+            return "right_turns"
+        if "left turn" in prompt_lower or "left-turn" in prompt_lower:
+            return "total_turns"
+        if "total" in prompt_lower and "turn" in prompt_lower:
+            return "total_turns"
+        if "turn" in prompt_lower:
+            return "right_turns"
+        return "relative_position"
+
+    # ------------------------------------------------------------------
+    #  _parse_steps_from_text – parse structured steps from side-stream
+    # ------------------------------------------------------------------
+    def _parse_steps_from_text(self, text: str):
+        """
+        Parse all structured maze steps from text.
+
+        Returns list of parsed step dicts.
+        """
+        steps = []
+
+        step_pattern = re.compile(
+            r'>>>\s*STEP\s+(\d+):\s*Move\s+\w+\s+from\s+\([^)]+\)\s+to\s+\([^)]+\).*?'
+            r'Running count:\s*Right\s*=\s*\d+\s*,\s*Left\s*=\s*\d+[^\n]*',
+            re.IGNORECASE | re.DOTALL
+        )
+
+        for match in step_pattern.finditer(text):
+            parsed = parse_maze_step(match.group(0))
+            if parsed:
+                steps.append(parsed)
+
+        return steps
+
+    def _verify_all_steps(self, steps):
+        """
+        Verify a sequence of parsed maze steps against the grid.
+
+        Returns:
+            (all_valid, first_error_step_num, errors, final_pos, final_dir,
+             right_count, left_count, total_count)
+        """
+        pos = self.start_pos
+        direction = Direction.NONE
+        right_count = 0
+        left_count = 0
+        total_count = 0
+
+        for step in steps:
+            is_valid, errors, state = verify_maze_step(
+                step=step,
+                grid=self.grid,
+                expected_from_pos=pos,
+                prev_direction=direction,
+                expected_right_count=right_count,
+                expected_left_count=left_count,
+                expected_total_count=total_count,
+            )
+
+            if not is_valid:
+                return (False, step.get('step_num', 0), errors,
+                        pos, direction, right_count, left_count, total_count)
+
+            pos = state['new_pos']
+            direction = state['new_direction']
+            right_count = state['new_right']
+            left_count = state['new_left']
+            total_count = state['new_total']
+
+        return (True, None, [], pos, direction,
+                right_count, left_count, total_count)
+
+    # ------------------------------------------------------------------
+    #  _side_stream_maze_steps – streams tokens to get traced path
+    # ------------------------------------------------------------------
+    async def _side_stream_maze_steps(self, text_so_far: str, max_new_tokens: int = 300) -> str:
+        """
+        Send ``prompt + text_so_far`` to vLLM, stream at most
+        *max_new_tokens* tokens, and return the generated text.
+
+        ``text_so_far`` is expected to end with the structured maze step
+        prompt so the model outputs its traced steps.
+        """
+        logger.info(
+            f"[Maze Side-stream] Starting path extraction\n"
+            f"  Maze: S={self.start_pos}, E={self.exit_pos}\n"
+            f"  Max new tokens: {max_new_tokens}"
+        )
+
+        payload = deepcopy(self.llm_server["payload"])
+        payload["prompt"] = self.prompt + text_so_far
+        payload["max_tokens"] = max_new_tokens
+        payload.pop("logprobs", None)
+
+        generated = ""
+
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "POST",
+                self.llm_server["url"],
+                headers=self.llm_server["headers"],
+                json=payload,
+            ) as response:
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data = line[len("data: "):].strip()
+                        if data == "[DONE]":
+                            break
+                        chunk = json.loads(data)["choices"][0]["text"]
+                        generated += chunk
+                        logger.debug(f"[Maze Side-stream] chunk: {chunk!r}")
+
+                        # Stop if we see FINAL ANSWER or \boxed
+                        if '\\boxed' in generated or '>>> FINAL ANSWER' in generated:
+                            break
+
+        logger.info(
+            f"[Maze Side-stream] Generated {len(generated)} chars"
+        )
+        return generated
+
+    # ------------------------------------------------------------------
+    #  _extract_boxed_answer
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _extract_boxed_answer(text: str) -> Optional[str]:
+        """Extract the content of the last \\boxed{...} in text."""
+        matches = list(re.finditer(r'\\boxed\{', text))
+        if not matches:
+            return None
+        last_match = matches[-1]
+        start = last_match.end()
+        brace_count = 1
+        end = start
+        while end < len(text) and brace_count > 0:
+            if text[end] == '{':
+                brace_count += 1
+            elif text[end] == '}':
+                brace_count -= 1
+            end += 1
+        return text[start:end - 1].strip()
+
+    # ------------------------------------------------------------------
+    #  step_extractor
+    # ------------------------------------------------------------------
+    def step_extractor(self, chunk: str, generated_text: str):
+        """
+        Phase 1 (thinking): trigger at every newline_threshold multiple
+            (after warmup).
+        Phase 2 (after </think>): trigger on structured steps or boxed
+            answer.
+        """
+        # ===== PHASE 1: still inside <think> =====
+        if self._is_in_thinking_phase(generated_text):
+            if self._think_phase_corrections >= self.max_corrections:
+                return False, None
+
+            total_double_newlines = generated_text.count('\n\n')
+
+            if total_double_newlines < self.warmup_newlines:
+                return False, None
+
+            past_warmup = total_double_newlines - self.warmup_newlines
+            if (generated_text.endswith('\n\n')
+                    and past_warmup >= 0
+                    and past_warmup % self.newline_threshold == 0):
+                logger.info(
+                    f"[Maze step_extractor] Phase 1 trigger: \\n\\n count={total_double_newlines} "
+                    f"(warmup={self.warmup_newlines}, past_warmup={past_warmup}, "
+                    f"threshold={self.newline_threshold})"
+                )
+                return True, generated_text
+
+            return False, None
+
+        # ===== PHASE 2: after </think> =====
+
+        # 2a: structured prompt not yet injected → trigger immediately
+        if not self._structured_prompt_injected(generated_text):
+            logger.info(
+                "[Maze step_extractor] Phase 2a: </think> detected, "
+                "structured prompt not yet injected."
+            )
+            return True, generated_text
+
+        # 2b: structured prompt injected — verify steps / boxed answer
+        think_end_pos = generated_text.find(self.answer_start_token) + len(self.answer_start_token)
+        text_after_think = generated_text[think_end_pos:]
+
+        # Strip out the injected <format>...</format> template so we only
+        # look at actual model output (which starts after the last
+        # ">>> LOCATE START AND EXIT:\n" line that ends the injected prompt).
+        last_marker_pos = text_after_think.rfind(self._structured_marker)
+        if last_marker_pos >= 0:
+            # Model output starts right after the marker line
+            model_output_start = last_marker_pos + len(self._structured_marker)
+            text_after_think = text_after_think[model_output_start:]
+            text_start_offset = think_end_pos + model_output_start
+        else:
+            text_start_offset = think_end_pos
+
+        # Skip past feedback blocks
+        feedback_pattern = re.compile(r'\[VERIFIER FEEDBACK[^\]]*\]\s*', re.DOTALL)
+        last_feedback_end = 0
+        for match in feedback_pattern.finditer(text_after_think):
+            last_feedback_end = match.end()
+        text = text_after_think[last_feedback_end:]
+        text_start = text_start_offset + last_feedback_end
+
+        # For turn-counting questions, check for structured steps
+        if self.question_type in ("right_turns", "total_turns"):
+            # Check for complete step (with Running count including Right=N, Left=N)
+            step_pattern = re.compile(
+                r'(>>>\s*STEP\s+(\d+):\s*Move\s+\w+\s+from\s+\([^)]+\)\s+to\s+\([^)]+\).*?'
+                r'Running count:\s*Right\s*=\s*\d+\s*,\s*Left\s*=\s*\d+[^\n]*)',
+                re.IGNORECASE | re.DOTALL
+            )
+            all_steps = list(step_pattern.finditer(text))
+
+            if all_steps:
+                last_step = all_steps[-1]
+                # Check if next step started (current already verified)
+                text_after = text[last_step.end():]
+                next_step = re.search(r'>>>\s*STEP\s+\d+', text_after, re.IGNORECASE)
+                if not next_step:
+                    end_pos = text_start + last_step.end()
+                    return True, generated_text[:end_pos]
+                return False, None
+
+            # Check LOCATE section
+            locate_pattern = re.compile(
+                r'(LOCATE START AND EXIT.*?E position:\s*\([^)]+\))',
+                re.IGNORECASE | re.DOTALL
+            )
+            locate_match = locate_pattern.search(text)
+            if locate_match:
+                step1_start = re.search(r'>>>\s*STEP\s+1', text[locate_match.end():], re.IGNORECASE)
+                if step1_start:
+                    end_pos = text_start + locate_match.end()
+                    return True, generated_text[:end_pos]
+
+        # Check for boxed answer (any question type)
+        boxed = re.search(r'\\boxed\{[^}]+\}', text)
+        if boxed:
+            end_pos = text_start + boxed.end()
+            return True, generated_text[:end_pos]
+
+        return False, None
+
+    # ------------------------------------------------------------------
+    #  verify
+    # ------------------------------------------------------------------
+    async def verify(self, step: str, token_index: int, event, event_info):
+        """
+        Case 1 -- still in thinking (no </think>):
+            Fork side-stream to get traced path steps, verify each.
+        Case 2 -- after </think>:
+            Verify structured steps and/or final answer.
+        """
+
+        # ==================================================================
+        # CASE 1: Thinking phase – side-stream path verification
+        # ==================================================================
+        if self.answer_start_token not in step:
+            total_dn = step.count('\n\n')
+            logger.info(
+                f"[Maze Phase 1] Thinking-phase verification triggered\n"
+                f"  \\n\\n count  : {total_dn}\n"
+                f"  Thinking len : {len(step)} chars"
+            )
+
+            # Build text with injected prompt for step extraction
+            # Uses the LLM's own voice: "Let me output the current steps..."
+            text_with_prompt = step + self._thinking_phase_prompt
+
+            # Side-stream: get path steps from the model
+            side_output = await self._side_stream_maze_steps(
+                text_with_prompt, max_new_tokens=300
+            )
+
+            if not side_output or len(side_output.strip()) < 20:
+                logger.info(
+                    "[Maze Phase 1] Insufficient output from side-stream. "
+                    "Letting model continue thinking."
+                )
+                return step, None
+
+            # Combine the prompt header with side output for parsing
+            full_side_text = (
+                ">>> LOCATE START AND EXIT:\n" + side_output
+            )
+
+            # First verify LOCATE section
+            locate_valid, locate_errors = verify_locate_section(
+                full_side_text, self.start_pos, self.exit_pos
+            )
+
+            if not locate_valid:
+                self._think_phase_corrections += 1
+                error_summary = "; ".join(locate_errors)
+                logger.info(
+                    f"[Maze Phase 1] LOCATE section errors: {error_summary}\n"
+                    f"  Action: Inject feedback into thinking trace\n"
+                    f"  Corrections: {self._think_phase_corrections}/{self.max_corrections}"
+                )
+                thinking_feedback = (
+                    f"\n\nWait, I think I have the wrong positions. "
+                    f"{error_summary}. "
+                    f"Let me re-examine the maze grid carefully to find S and E.\n"
+                )
+                if not event.is_set():
+                    event_info["generated_text"] = step
+                    event_info["feedback"] = thinking_feedback
+                    event_info["correction_index"] = token_index
+                    event_info["errors"] = locate_errors
+                    event_info["phase"] = "rollback_to_thinking"
+                    event.set()
+                return step, thinking_feedback
+
+            # Parse and verify steps
+            steps = self._parse_steps_from_text(full_side_text)
+
+            if not steps:
+                logger.info(
+                    "[Maze Phase 1] No structured steps found in side-stream. "
+                    "Letting model continue thinking."
+                )
+                return step, None
+
+            (all_valid, err_step_num, errors, final_pos,
+             final_dir, r_count, l_count, t_count) = self._verify_all_steps(steps)
+
+            if not all_valid:
+                error_summary = "; ".join(errors)
+                self._think_phase_corrections += 1
+                logger.info(
+                    f"[Maze Phase 1] INVALID step {err_step_num}\n"
+                    f"  Error(s) : {error_summary}\n"
+                    f"  Action   : Inject feedback into thinking trace\n"
+                    f"  Corrections: {self._think_phase_corrections}/{self.max_corrections}"
+                )
+                thinking_feedback = (
+                    f"\n\nWait, I made an error at Step {err_step_num}. "
+                    f"{error_summary}. "
+                    f"Let me re-trace the path more carefully from the correct position.\n"
+                )
+                if not event.is_set():
+                    event_info["generated_text"] = step
+                    event_info["feedback"] = thinking_feedback
+                    event_info["correction_index"] = token_index
+                    event_info["errors"] = errors
+                    event_info["phase"] = "rollback_to_thinking"
+                    event.set()
+                return step, thinking_feedback
+
+            # All steps valid — check if path is complete (reached E)
+            if final_pos == self.exit_pos:
+                self._verified_path_complete = True
+                logger.info(
+                    f"[Maze Phase 1] VALID COMPLETE path to E={self.exit_pos}\n"
+                    f"  Steps: {len(steps)}, Right={r_count}, Left={l_count}, Total={t_count}\n"
+                    f"  Action: Inject early-stop + </think> + structured format."
+                )
+                # Include the structured prompt directly after </think>
+                # so the model immediately starts filling in the answer format
+                # (skips the separate Phase 2a injection round-trip).
+                early_stop_msg = (
+                    f"\n\nWait, I have successfully traced the path from "
+                    f"S={self.start_pos} to E={self.exit_pos} with "
+                    f"{len(steps)} steps. "
+                    f"Right turns={r_count}, Left turns={l_count}, "
+                    f"Total turns={t_count}. "
+                    f"This path has been verified as correct. "
+                    f"Let me give the final answer.\n"
+                    f"{self.answer_start_token}"
+                    f"{self._structured_prompt}"
+                )
+                if not event.is_set():
+                    event_info["generated_text"] = step
+                    event_info["feedback"] = early_stop_msg
+                    event_info["correction_index"] = token_index
+                    event_info["phase"] = "early_stop_answer"
+                    event_info["verified_counts"] = {
+                        "right": r_count,
+                        "left": l_count,
+                        "total": t_count,
+                        "steps": len(steps),
+                    }
+                    event.set()
+                return step, early_stop_msg
+
+            else:
+                logger.info(
+                    f"[Maze Phase 1] VALID PARTIAL path\n"
+                    f"  Current pos: {final_pos}, Target: {self.exit_pos}\n"
+                    f"  Steps so far: {len(steps)}\n"
+                    f"  Action: No error, let model keep thinking."
+                )
+                return step, None
+
+        # ==================================================================
+        # CASE 2a: </think> present but structured prompt not yet injected
+        # ==================================================================
+        if not self._structured_prompt_injected(step):
+            logger.info(
+                "[Maze Phase 2a] </think> detected. "
+                "Injecting structured step format."
+            )
+            if not event.is_set():
+                event_info["generated_text"] = step
+                event_info["feedback"] = self._structured_prompt
+                event_info["correction_index"] = token_index
+                event_info["phase"] = "inject_structured_prompt"
+                event.set()
+            return step, self._structured_prompt
+
+        # ==================================================================
+        # CASE 2b: Structured prompt injected — verify output
+        # ==================================================================
+
+        num_corrections = self._count_feedback_blocks(step)
+        if num_corrections >= self.max_corrections:
+            fb = "\nthe answer is \\boxed{no solution}"
+            if not event.is_set():
+                event_info["generated_text"] = step
+                event_info["feedback"] = fb
+                event_info["correction_index"] = token_index
+                event_info["errors"] = ["Max corrections reached"]
+                event_info["phase"] = "standard_verify"
+                event.set()
+            return step, fb
+
+        think_end_pos = step.find(self.answer_start_token) + len(self.answer_start_token)
+        text_after_think = step[think_end_pos:]
+
+        # Strip the injected <format>...</format> template — only look at
+        # actual model output starting from the last ">>> LOCATE START AND EXIT:" marker.
+        last_marker_pos = text_after_think.rfind(self._structured_marker)
+        if last_marker_pos >= 0:
+            text_after_think = text_after_think[last_marker_pos:]
+
+        feedback_pattern = re.compile(r'\[VERIFIER FEEDBACK[^\]]*\]\s*', re.DOTALL)
+        last_feedback_end = 0
+        for match in feedback_pattern.finditer(text_after_think):
+            last_feedback_end = match.end()
+        recent_text = text_after_think[last_feedback_end:]
+
+        # --- Verify LOCATE section ---
+        locate_match = re.search(r'LOCATE START AND EXIT', recent_text, re.IGNORECASE)
+        if locate_match:
+            step1_start = re.search(r'>>>\s*STEP\s+1', recent_text, re.IGNORECASE)
+            if step1_start or '\\boxed' in recent_text:
+                if step1_start:
+                    locate_text = recent_text[locate_match.start():step1_start.start()]
+                else:
+                    locate_text = recent_text[locate_match.start():]
+                is_valid, loc_errors = verify_locate_section(
+                    locate_text, self.start_pos, self.exit_pos
+                )
+                if not is_valid:
+                    feedback = format_locate_feedback(loc_errors)
+                    if not event.is_set():
+                        event_info["generated_text"] = step
+                        event_info["feedback"] = feedback
+                        event_info["correction_index"] = token_index
+                        event_info["errors"] = loc_errors
+                        event_info["phase"] = "standard_verify"
+                        event.set()
+                    return step, feedback
+
+        # --- Verify structured steps ---
+        if self.question_type in ("right_turns", "total_turns"):
+            step_pattern = re.compile(
+                r'(>>>\s*STEP\s+(\d+):\s*Move\s+\w+\s+from\s+\([^)]+\)\s+to\s+\([^)]+\).*?'
+                r'Running count:[^\n]+)',
+                re.IGNORECASE | re.DOTALL
+            )
+            # Find steps in recent_text (after last feedback) to know what to verify
+            recent_step_matches = list(step_pattern.finditer(recent_text))
+
+            if recent_step_matches:
+                last_match = recent_step_matches[-1]
+                last_step_text = last_match.group(0)
+                last_step_num = int(last_match.group(2))
+                parsed = parse_maze_step(last_step_text)
+
+                if parsed:
+                    # For state reconstruction, gather ALL steps from the
+                    # full text (not just recent_text).  When a step number
+                    # appears multiple times (original + corrections), only
+                    # the LAST occurrence before the target step is used.
+                    all_full_matches = list(step_pattern.finditer(text_after_think))
+                    state = self._get_state_before_step_phase2(
+                        text_after_think, last_step_num, all_full_matches
+                    )
+
+                    is_valid, errors, new_state = verify_maze_step(
+                        step=parsed,
+                        grid=self.grid,
+                        expected_from_pos=state['position'],
+                        prev_direction=state['direction'],
+                        expected_right_count=state['right_count'],
+                        expected_left_count=state['left_count'],
+                        expected_total_count=state['total_count'],
+                    )
+
+                    if not is_valid:
+                        feedback = format_maze_feedback(errors, last_step_num)
+                        if not event.is_set():
+                            event_info["generated_text"] = step
+                            event_info["feedback"] = feedback
+                            event_info["correction_index"] = token_index
+                            event_info["errors"] = errors
+                            event_info["phase"] = "standard_verify"
+                            event.set()
+                        return step, feedback
+
+        # --- Check for boxed answer ---
+        boxed_answer = self._extract_boxed_answer(recent_text)
+        if boxed_answer is not None:
+            logger.info(f"[Maze Phase 2b] Extracted boxed answer: {boxed_answer}")
+            if not event.is_set():
+                event_info["generated_text"] = step
+                event_info["feedback"] = ""
+                event_info["correction_index"] = token_index
+                event_info["phase"] = "final_answer_correct"
+                event.set()
+            return step, None
+
+        return step, None
+
+    # ------------------------------------------------------------------
+    #  _get_state_before_step_phase2 – reconstruct state for Phase 2
+    # ------------------------------------------------------------------
+    def _get_state_before_step_phase2(self, text: str, target_step_num: int,
+                                       all_step_matches: list) -> dict:
+        """Reconstruct state before a given step from Phase 2 structured output.
+        
+        When a step number appears multiple times (original + corrections after
+        verifier feedback), only the LAST occurrence of each step number is used,
+        so that corrected steps override earlier invalid ones.
+        """
+        state = {
+            'position': self.start_pos,
+            'direction': Direction.NONE,
+            'right_count': 0,
+            'left_count': 0,
+            'total_count': 0,
+        }
+
+        # Collect the last occurrence of each step number before the target
+        last_by_num = {}
+        for match in all_step_matches:
+            step_num = int(match.group(2))
+            if step_num >= target_step_num:
+                continue
+            last_by_num[step_num] = match  # later occurrences overwrite earlier
+
+        # Replay in step-number order
+        for step_num in sorted(last_by_num.keys()):
+            parsed = parse_maze_step(last_by_num[step_num].group(0))
+            if not parsed:
+                continue
+
+            direction = parsed['direction']
+            to_pos = parsed['to_pos']
+
+            turn_type = get_expected_turn_type(state['direction'], direction)
+            if turn_type == 'RIGHT_TURN':
+                state['right_count'] += 1
+                state['total_count'] += 1
+            elif turn_type == 'LEFT_TURN':
+                state['left_count'] += 1
+                state['total_count'] += 1
+
+            state['position'] = to_pos
+            state['direction'] = direction
+
+        return state
+
+    # ------------------------------------------------------------------
+    #  fix
+    # ------------------------------------------------------------------
+    async def fix(self, generated_text: str, event_info: dict, fix_method=None):
+        """Apply the appropriate fix depending on the phase."""
+        phase = event_info.get("phase", "standard_verify")
+
+        if phase == "rollback_to_thinking":
+            base_text = event_info["generated_text"]
+            result = base_text.rstrip() + event_info["feedback"]
+            logger.info(
+                f"[Maze fix] Phase: rollback_to_thinking\n"
+                f"  -> Appended error feedback into <think> trace.\n"
+                f"  -> Think-phase corrections: {self._think_phase_corrections}/{self.max_corrections}"
+            )
+            return result
+
+        if phase == "early_stop_answer":
+            base_text = event_info["generated_text"]
+            result = base_text.rstrip() + event_info["feedback"]
+            counts = event_info.get("verified_counts", {})
+            logger.info(
+                f"[Maze fix] Phase: early_stop_answer\n"
+                f"  -> Path verified: {counts.get('steps', '?')} steps, "
+                f"R={counts.get('right', '?')}, L={counts.get('left', '?')}, "
+                f"T={counts.get('total', '?')}\n"
+                f"  -> Injecting early-stop + </think> + structured format."
             )
             return result
 
         if phase == "inject_structured_prompt":
             logger.info(
-                "[ThinkingPhaseVerifier] fix(): appending structured "
-                "output prompt after natural </think>"
+                "[Maze fix] Phase: inject_structured_prompt\n"
+                "  -> Appending structured step format after </think>."
             )
             return event_info["generated_text"] + event_info["feedback"]
 
+        if phase == "final_answer_correct":
+            logger.info(
+                f"[Maze fix] Phase: final_answer_correct\n"
+                f"  -> Stopping generation."
+            )
+            return event_info["generated_text"]
+
         # standard_verify
-        logger.info("[ThinkingPhaseVerifier] fix(): standard step feedback")
+        errors = event_info.get("errors", [])
+        error_summary = "; ".join(errors) if errors else "unknown"
+        logger.info(
+            f"[Maze fix] Phase: standard_verify\n"
+            f"  -> Error: {error_summary}\n"
+            f"  -> Appending [VERIFIER FEEDBACK] so model retries."
+        )
         return event_info["generated_text"] + event_info["feedback"]

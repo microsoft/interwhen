@@ -46,11 +46,26 @@ DIRECTION_DELTAS = {
 }
 
 
+# Map alternative direction names (cardinal) to the canonical enum names
+_DIRECTION_ALIASES = {
+    'NORTH': 'UP',
+    'SOUTH': 'DOWN',
+    'EAST': 'RIGHT',
+    'WEST': 'LEFT',
+}
+
+
 def parse_direction(dir_str: str) -> Direction:
-    """Parse direction string to Direction enum."""
+    """Parse direction string to Direction enum.
+
+    Accepts canonical names (UP/DOWN/LEFT/RIGHT) **and** cardinal names
+    (NORTH/SOUTH/EAST/WEST).
+    """
     dir_str = dir_str.strip().upper()
     if dir_str in ['—', '-', 'NONE', '']:
         return Direction.NONE
+    # Resolve cardinal aliases
+    dir_str = _DIRECTION_ALIASES.get(dir_str, dir_str)
     try:
         return Direction[dir_str]
     except KeyError:
@@ -66,6 +81,35 @@ def get_expected_turn_type(prev_dir: Direction, curr_dir: Direction) -> str:
     if (prev_dir, curr_dir) in LEFT_TURNS:
         return 'LEFT_TURN'
     return 'UNKNOWN'
+
+
+# Map common turn type variations to canonical names
+_TURN_TYPE_ALIASES = {
+    'RIGHT': 'RIGHT_TURN',
+    'RIGHT TURN': 'RIGHT_TURN',
+    'RIGHT_TURN': 'RIGHT_TURN',
+    'RIGHTTURN': 'RIGHT_TURN',
+    'LEFT': 'LEFT_TURN',
+    'LEFT TURN': 'LEFT_TURN',
+    'LEFT_TURN': 'LEFT_TURN',
+    'LEFTTURN': 'LEFT_TURN',
+    'STRAIGHT': 'STRAIGHT',
+    'NONE': 'STRAIGHT',
+    'NO TURN': 'STRAIGHT',
+    'NO_TURN': 'STRAIGHT',
+    'NOTURN': 'STRAIGHT',
+}
+
+
+def normalize_turn_type(turn_str: str) -> str:
+    """Normalize a claimed turn type string to canonical form.
+
+    Accepts common variations such as ``RIGHT``, ``RIGHT TURN``,
+    ``RIGHT_TURN``, ``RIGHTTURN`` (case-insensitive) and maps them to
+    the canonical ``RIGHT_TURN`` / ``LEFT_TURN`` / ``STRAIGHT``.
+    """
+    turn_str = turn_str.strip().upper()
+    return _TURN_TYPE_ALIASES.get(turn_str, turn_str)
 
 
 def parse_maze_from_prompt(prompt: str) -> Tuple[List[List[str]], Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
@@ -162,10 +206,16 @@ def parse_maze_step(step_text: str) -> Optional[Dict[str, Any]]:
     else:
         result['claimed_curr_dir'] = None
     
-    # Extract turn type
-    turn_match = re.search(r'Turn type:\s*(\S+)', step_text)
+    # Extract turn type (handle multi-word like 'RIGHT TURN', 'LEFT_TURN', etc.)
+    # Strip parenthetical comments like 'RIGHT (DOWN → LEFT is a RIGHT turn)'
+    turn_match = re.search(r'Turn type:\s*(.+)', step_text)
     if turn_match:
-        result['claimed_turn'] = turn_match.group(1).upper()
+        turn_raw = turn_match.group(1).strip()
+        # Remove parenthetical comments: "RIGHT (DOWN → LEFT ...)" → "RIGHT"
+        turn_raw = re.sub(r'\s*\(.*', '', turn_raw)
+        # Also strip trailing punctuation/whitespace
+        turn_raw = turn_raw.strip().rstrip(':')
+        result['claimed_turn'] = normalize_turn_type(turn_raw)
     else:
         result['claimed_turn'] = None
     

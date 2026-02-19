@@ -1,14 +1,12 @@
 import argparse
 import asyncio
 import csv
-import json
 import logging
 import os
 import re
 import numpy as np
 
 from datasets import load_dataset
-from openai import OpenAI
 from transformers import AutoTokenizer
 
 from interwhen import stream_completion
@@ -214,10 +212,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Game of 24 step-by-step solver with monitors")
     parser.add_argument("--thinking", "-t", action="store_true", help="Enable chain-of-thought output")
     parser.add_argument("--monitor", "-m", default = True, action="store_true", help="Enable step-by-step monitor")
-    parser.add_argument("--num_examples", "-n", type=int, default=1, help="Number of examples to run")
+    parser.add_argument("--num_examples", "-n", type=int, default=1362, help="Number of examples to run")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logs")
-    parser.add_argument("--thinking_verify", "-tv", action="store_true", help="Enable thinking-phase step verification (verify during <think> trace)")
-    parser.add_argument("--newline_threshold", type=int, default=15, help="Number of newlines in thinking before forcing step verification (used with --thinking_verify)")
+    parser.add_argument("--thinking_verify", "-tv", action="store_true", default = True, help="Enable thinking-phase step verification (verify during <think> trace)")
+    parser.add_argument("--newline_threshold", type=int, default=10, help="Number of newlines in thinking before forcing step verification (used with --thinking_verify)")
+    parser.add_argument("--warmup", type=int, default=0, help="Number of \\n\\n to skip before starting side-chain verification (warmup period)")
     parser.add_argument("--main_model", type=str, default=MAIN_MODEL, help="Main model to use for generation")
     parser.add_argument("--earlystop_model", type=str, default=EARLYSTOP_MODEL, help="Model to use for early stopping")
     args = parser.parse_args()
@@ -267,7 +266,7 @@ if __name__ == "__main__":
     # total = len(dataset)
     indices = np.linspace(0, len(dataset)-1, N, dtype=int)
 
-    for idx in indices: #for idx in indices:
+    for idx in indices:
         example = dataset[idx]
         nums = example["numbers"]
 
@@ -287,6 +286,7 @@ if __name__ == "__main__":
                 newline_threshold=threshold,
                 max_corrections=5,
                 answer_start_token="</think>",
+                warmup_newlines=args.warmup,
             ),)
         else:
             monitors = ()
