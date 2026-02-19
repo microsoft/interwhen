@@ -54,6 +54,24 @@ _DIRECTION_ALIASES = {
     'WEST': 'LEFT',
 }
 
+# Reverse mapping: enum name -> cardinal name (for feedback messages)
+_CARDINAL_NAMES = {
+    Direction.UP: 'NORTH',
+    Direction.DOWN: 'SOUTH',
+    Direction.LEFT: 'WEST',
+    Direction.RIGHT: 'EAST',
+    Direction.NONE: 'NONE',
+}
+
+
+def cardinal_name(d: Direction) -> str:
+    """Return the cardinal compass name for a Direction enum value.
+
+    Used in feedback messages so that the model (which often thinks in
+    NORTH/SOUTH/EAST/WEST terms) can understand corrections.
+    """
+    return _CARDINAL_NAMES.get(d, d.name)
+
 
 def parse_direction(dir_str: str) -> Direction:
     """Parse direction string to Direction enum.
@@ -289,7 +307,10 @@ def verify_maze_step(
     if expected_delta:
         actual_delta = (to_pos[0] - from_pos[0], to_pos[1] - from_pos[1])
         if actual_delta != expected_delta:
-            errors.append(f"Move {direction.name} doesn't match delta {actual_delta}, expected {expected_delta}")
+            errors.append(
+                f"Move {cardinal_name(direction)} from {from_pos} to {to_pos} has delta {actual_delta}, "
+                f"but {cardinal_name(direction)} should have delta {expected_delta} (row_change, col_change)"
+            )
     
     # 3. Verify to_pos is walkable (not a wall)
     if 0 <= to_pos[0] < len(grid) and 0 <= to_pos[1] < len(grid[0]):
@@ -306,7 +327,18 @@ def verify_maze_step(
     # 5. Verify turn type
     expected_turn = get_expected_turn_type(prev_direction, direction)
     if claimed_turn is not None and claimed_turn != expected_turn:
-        errors.append(f"Turn type {claimed_turn} should be {expected_turn} (prev={prev_direction.name}, curr={direction.name})")
+        prev_card = cardinal_name(prev_direction)
+        curr_card = cardinal_name(direction)
+        if expected_turn == 'RIGHT_TURN':
+            clock_desc = "clockwise (RIGHT turn)"
+        elif expected_turn == 'LEFT_TURN':
+            clock_desc = "counterclockwise (LEFT turn)"
+        else:
+            clock_desc = "no turn (STRAIGHT)"
+        errors.append(
+            f"Turn type {claimed_turn} should be {expected_turn}. "
+            f"Going from {prev_card} to {curr_card} is a {clock_desc} rotation."
+        )
     
     # 6. Calculate expected counts after this step
     new_right = expected_right_count
@@ -322,11 +354,11 @@ def verify_maze_step(
     
     # 7. Verify running counts
     if claimed_right is not None and claimed_right != new_right:
-        errors.append(f"Right count {claimed_right} should be {new_right}")
+        errors.append(f"Right turn count {claimed_right} should be {new_right}")
     if claimed_left is not None and claimed_left != new_left:
-        errors.append(f"Left count {claimed_left} should be {new_left}")
+        errors.append(f"Left turn count {claimed_left} should be {new_left}")
     if claimed_total is not None and claimed_total != new_total:
-        errors.append(f"Total count {claimed_total} should be {new_total}")
+        errors.append(f"Total turn count {claimed_total} should be {new_total}")
     
     # Update state for next step
     state['new_pos'] = to_pos
@@ -371,7 +403,12 @@ def format_maze_feedback(errors: List[str], step_num: int) -> str:
     feedback = f"\n\n[VERIFIER FEEDBACK for Step {step_num}:\n"
     for err in errors:
         feedback += f"  ✗ {err}\n"
-    feedback += "Please correct this step and continue.]\n\n"
+    feedback += (
+        "IMPORTANT: Clockwise on a compass is NORTH→EAST→SOUTH→WEST→NORTH. "
+        "A RIGHT turn = 90° clockwise; a LEFT turn = 90° counterclockwise. "
+        "For example: SOUTH→WEST is RIGHT (clockwise), SOUTH→EAST is LEFT (counterclockwise). "
+        "Please correct this step and continue.]\n\n"
+    )
     return feedback
 
 

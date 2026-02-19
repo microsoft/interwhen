@@ -79,7 +79,7 @@ from ..utils.maze_verifier import (
     Direction, parse_direction, get_expected_turn_type,
     parse_maze_from_prompt, parse_maze_step, verify_maze_step,
     verify_locate_section, format_maze_feedback, format_locate_feedback,
-    DIRECTION_DELTAS,
+    DIRECTION_DELTAS, compute_relative_direction,
 )
 
 logger = logging.getLogger(__name__)
@@ -896,6 +896,82 @@ class ThinkingPhaseStepVerifierMazeMonitor(VerifyMonitor):
             return "right_turns"
         return "relative_position"
 
+    def _verify_relative_position_answer(self, boxed_answer: str) -> Tuple[bool, Optional[str]]:
+        """Verify a relative-position boxed answer (A=Yes / B=No).
+
+        Parses the question from ``self.prompt`` to determine the asked
+        direction, computes the true relative direction of E from S,
+        and checks whether the model's Yes/No answer is correct.
+
+        Returns ``(is_correct, feedback_or_None)``.
+        """
+        # Map boxed letter → Yes / No
+        answer_map = {"A": "Yes", "B": "No"}
+        model_yn = answer_map.get(boxed_answer.strip().upper())
+        if model_yn is None:
+            # Not A or B – can't verify
+            return True, None
+
+        # --- Parse the asked direction from the prompt ---
+        # Patterns: "directly to the left of the starting point (S)"
+        #           "directly below the starting point (S)"
+        #           "to the top right of the starting point (S)"
+        m = re.search(
+            r'Is the exit \(E\)\s+(.*?)\s+(?:of\s+)?the starting point \(S\)',
+            self.prompt, re.IGNORECASE,
+        )
+        if not m:
+            return True, None  # can't parse question, skip verification
+
+        asked_raw = m.group(1).strip().lower()
+        # Remove trailing comma and extra clauses like ", with no ..."
+        asked_raw = re.sub(r',.*', '', asked_raw).strip()
+
+        # --- Compute actual relative direction ---
+        actual = compute_relative_direction(self.start_pos, self.exit_pos)
+
+        # --- Determine expected Yes / No ---
+        # "directly to the left … with no vertical displacement"
+        #  → same row, E col < S col  → actual in {"west"}
+        # "directly below … with no horizontal displacement"
+        #  → same col, E row > S row  → actual in {"south"}
+        # "to the top right" → E north-east of S → actual == "northeast"
+        direction_keywords = {
+            "directly to the left":   {"west"},
+            "directly to the right":  {"east"},
+            "directly above":         {"north"},
+            "directly below":         {"south"},
+            "to the top left":        {"northwest"},
+            "to the top right":       {"northeast"},
+            "to the bottom left":     {"southwest"},
+            "to the bottom right":    {"southeast"},
+        }
+
+        expected_dirs = direction_keywords.get(asked_raw)
+        if expected_dirs is None:
+            return True, None  # unrecognised pattern, skip
+
+        expected_yn = "Yes" if actual in expected_dirs else "No"
+
+        if model_yn == expected_yn:
+            return True, None
+
+        # --- Build feedback ---
+        sr, sc = self.start_pos
+        er, ec = self.exit_pos
+        feedback = (
+            f"\n\n[VERIFIER FEEDBACK for relative position:\n"
+            f"  ✗ Your answer {boxed_answer} ({model_yn}) is incorrect.\n"
+            f"  S is at row={sr}, col={sc}. E is at row={er}, col={ec}.\n"
+            f"  Row difference (E-S): {er - sr} ({'same row' if er == sr else ('E is below S' if er > sr else 'E is above S')}).\n"
+            f"  Col difference (E-S): {ec - sc} ({'same col' if ec == sc else ('E is right of S' if ec > sc else 'E is left of S')}).\n"
+            f"  Therefore E is {actual} of S → the correct answer to "
+            f"\"{asked_raw}\" is {expected_yn}.\n"
+            f"  Please output \\boxed{{{('A' if expected_yn == 'Yes' else 'B')}}} "
+            f"for {expected_yn}.]\n\n"
+        )
+        return False, feedback
+
     # ------------------------------------------------------------------
     #  _parse_steps_from_text – parse structured steps from side-stream
     # ------------------------------------------------------------------
@@ -1407,6 +1483,23 @@ class ThinkingPhaseStepVerifierMazeMonitor(VerifyMonitor):
         boxed_answer = self._extract_boxed_answer(recent_text)
         if boxed_answer is not None:
             logger.info(f"[Maze Phase 2b] Extracted boxed answer: {boxed_answer}")
+
+            # For relative_position questions, verify the Yes/No answer
+            if self.question_type == "relative_position":
+                is_correct, rp_feedback = self._verify_relative_position_answer(boxed_answer)
+                if not is_correct and rp_feedback:
+                    logger.info(
+                        f"[Maze Phase 2b] Relative position answer '{boxed_answer}' is INCORRECT."
+                    )
+                    if not event.is_set():
+                        event_info["generated_text"] = step
+                        event_info["feedback"] = rp_feedback
+                        event_info["correction_index"] = token_index
+                        event_info["errors"] = [f"Wrong relative position answer: {boxed_answer}"]
+                        event_info["phase"] = "standard_verify"
+                        event.set()
+                    return step, rp_feedback
+
             if not event.is_set():
                 event_info["generated_text"] = step
                 event_info["feedback"] = ""
