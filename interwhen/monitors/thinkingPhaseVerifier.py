@@ -84,6 +84,11 @@ from ..utils.maze_verifier import (
 from ..utils.spatialmap_verifier import (
     SpatialMapZ3Solver, extract_step2_claims,
     parse_directional_claims_from_text,
+    parse_counting_question, parse_model_count_from_answer,
+    parse_direction_question, parse_object_question,
+    parse_model_boxed_answer,
+    get_possible_directions, get_consistent_object_options,
+    get_possible_count_range,
     verify_spatialmap_step, format_spatialmap_feedback,
 )
 
@@ -1776,6 +1781,62 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
         self._think_phase_corrections = 0
         self.verified_claims: Set[Tuple[str, str, str]] = set()
 
+        # ---- counting-question verification ----
+        self._counting_question = parse_counting_question(problem_text)
+        self._counting_options: Dict[str, str] = {}
+        # Strip trailing instruction paragraph for clean option parsing
+        _opts_text = re.split(r'\nFirst,', problem_text, maxsplit=1)[0]
+        if self._counting_question:
+            # Parse MCQ options from problem text (e.g., "A. 5\nB. 3\nC. 0\nD. 1")
+            raw_opts = re.findall(
+                r'([A-D])\.\s*(.+?)\s*(?=[A-D]\.|$)',
+                _opts_text, flags=re.DOTALL,
+            )
+            self._counting_options = {
+                k: v.strip().rstrip(".") for k, v in raw_opts
+            }
+            logger.info(
+                f"[SpatialMap] Counting question detected: "
+                f"direction={self._counting_question['direction']}, "
+                f"reference={self._counting_question['reference']}, "
+                f"options={self._counting_options}"
+            )
+        self._count_feedback_given = False  # only give count feedback once
+
+        # ---- direction-question verification ----
+        self._direction_question = parse_direction_question(problem_text)
+        if self._direction_question:
+            logger.info(
+                f"[SpatialMap] Direction question detected: "
+                f"entity_a={self._direction_question['entity_a']}, "
+                f"entity_b={self._direction_question['entity_b']}"
+            )
+
+        # ---- object-question verification ----
+        self._object_question = parse_object_question(problem_text)
+        if self._object_question:
+            logger.info(
+                f"[SpatialMap] Object question detected: "
+                f"direction={self._object_question['direction']}, "
+                f"reference={self._object_question['reference']}"
+            )
+
+        # ---- Generic MCQ options (for direction & object Qs too) ----
+        if not self._counting_options:
+            raw_opts = re.findall(
+                r'([A-D])\.\s*(.+?)\s*(?=[A-D]\.|$)',
+                _opts_text, flags=re.DOTALL,
+            )
+            self._mcq_options: Dict[str, str] = {
+                k: v.strip().rstrip(".") for k, v in raw_opts
+            }
+        else:
+            self._mcq_options = dict(self._counting_options)
+
+        self._direction_feedback_given = False
+        self._object_feedback_given = False
+        self._diag_count_feedback_given = False
+
     @classmethod
     def from_prompt(
         cls,
@@ -2158,6 +2219,338 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
         # --- Check for boxed answer ---
         boxed_match = re.search(r'\\boxed\{[^}]+\}', recent_text)
         if boxed_match:
+
+            # ==========================================================
+            # Direction-question verification
+            # ==========================================================
+            if (
+                self._direction_question
+                and num_corrections < self.max_corrections
+                and not self._direction_feedback_given
+            ):
+                model_dir_text = parse_model_boxed_answer(
+                    recent_text, self._mcq_options
+                )
+                if model_dir_text:
+                    possible = get_possible_directions(
+                        self.z3_solver,
+                        self._direction_question["entity_a"],
+                        self._direction_question["entity_b"],
+                    )
+                    logger.info(
+                        f"[SpatialMap Phase 2b] Direction check: "
+                        f"model={model_dir_text}, possible={possible}"
+                    )
+                    if model_dir_text not in possible:
+                        self._direction_feedback_given = True
+                        # Find which MCQ options are consistent
+                        valid_options = [
+                            letter for letter, val in self._mcq_options.items()
+                            if val.strip().lower().rstrip(".") in possible
+                        ]
+                        if len(valid_options) == 1:
+                            # Force correct answer
+                            feedback = (
+                                f"\n\n[VERIFIER FEEDBACK: Direction error!\n"
+                                f"  '{model_dir_text.title()}' is "
+                                f"impossible for "
+                                f"{self._direction_question['entity_a']} "
+                                f"relative to "
+                                f"{self._direction_question['entity_b']} "
+                                f"based on the given constraints.\n"
+                                f"  The only consistent direction is "
+                                f"'{possible[0].title()}'.\n"
+                                f"  Please select option "
+                                f"{valid_options[0]}.]\n\n"
+                                f">>> STEP 3: ANSWER\n"
+                            )
+                        else:
+                            possible_str = ", ".join(
+                                d.title() for d in possible
+                            )
+                            feedback = (
+                                f"\n\n[VERIFIER FEEDBACK: Direction error!\n"
+                                f"  '{model_dir_text.title()}' is "
+                                f"impossible for "
+                                f"{self._direction_question['entity_a']} "
+                                f"relative to "
+                                f"{self._direction_question['entity_b']} "
+                                f"based on the given constraints.\n"
+                                f"  The possible directions are: "
+                                f"{possible_str}.\n"
+                                f"  Please reconsider and choose the "
+                                f"correct option.]\n\n"
+                                f">>> STEP 3: ANSWER\n"
+                            )
+                        if not event.is_set():
+                            event_info["generated_text"] = step
+                            event_info["feedback"] = feedback
+                            event_info["correction_index"] = token_index
+                            event_info["errors"] = [
+                                f"Direction '{model_dir_text}' impossible; "
+                                f"possible: {possible}"
+                            ]
+                            event_info["phase"] = "standard_verify"
+                            event.set()
+                        return step, feedback
+
+            # ==========================================================
+            # Object-question verification
+            # ==========================================================
+            if (
+                self._object_question
+                and num_corrections < self.max_corrections
+                and not self._object_feedback_given
+            ):
+                model_obj_text = parse_model_boxed_answer(
+                    recent_text, self._mcq_options
+                )
+                boxed_raw = re.findall(
+                    r'\\boxed\{([^}]*)\}', recent_text
+                )
+                model_letter = (
+                    boxed_raw[-1].strip().upper() if boxed_raw else None
+                )
+
+                if model_letter:
+                    consistent = get_consistent_object_options(
+                        self.z3_solver,
+                        self._object_question["direction"],
+                        self._object_question["reference"],
+                        self._mcq_options,
+                    )
+                    logger.info(
+                        f"[SpatialMap Phase 2b] Object check: "
+                        f"model={model_letter}, "
+                        f"consistent_options={consistent}"
+                    )
+                    if model_letter not in consistent:
+                        self._object_feedback_given = True
+                        odir = self._object_question["direction"]
+                        oref = self._object_question["reference"]
+                        if len(consistent) == 1:
+                            correct_name = self._mcq_options.get(
+                                consistent[0], consistent[0]
+                            )
+                            feedback = (
+                                f"\n\n[VERIFIER FEEDBACK: Object error!\n"
+                                f"  '{model_obj_text}' cannot be "
+                                f"{odir} of {oref} based on the "
+                                f"given constraints.\n"
+                                f"  The only consistent option is "
+                                f"{consistent[0]}. {correct_name}.\n"
+                                f"  Please select option "
+                                f"{consistent[0]}.]\n\n"
+                                f">>> STEP 3: ANSWER\n"
+                            )
+                        else:
+                            valid_names = [
+                                f"{l}. {self._mcq_options.get(l, l)}"
+                                for l in consistent
+                            ]
+                            feedback = (
+                                f"\n\n[VERIFIER FEEDBACK: Object error!\n"
+                                f"  '{model_obj_text}' cannot be "
+                                f"{odir} of {oref} based on the "
+                                f"given constraints.\n"
+                                f"  The consistent options are: "
+                                f"{', '.join(valid_names)}.\n"
+                                f"  Please reconsider and choose the "
+                                f"correct option.]\n\n"
+                                f">>> STEP 3: ANSWER\n"
+                            )
+                        if not event.is_set():
+                            event_info["generated_text"] = step
+                            event_info["feedback"] = feedback
+                            event_info["correction_index"] = token_index
+                            event_info["errors"] = [
+                                f"Object '{model_obj_text}' impossible "
+                                f"in {odir} of {oref}; "
+                                f"consistent: {consistent}"
+                            ]
+                            event_info["phase"] = "standard_verify"
+                            event.set()
+                        return step, feedback
+
+            # ==========================================================
+            # Counting-question verification (cardinal + diagonal)
+            # ==========================================================
+            if (
+                self._counting_question
+                and num_corrections < self.max_corrections
+            ):
+                direction = self._counting_question["direction"]
+                reference = self._counting_question["reference"]
+                is_cardinal = direction in (
+                    "north", "south", "east", "west"
+                )
+
+                if is_cardinal:
+                    # --- Cardinal: GT is always 0 ---
+                    model_count = parse_model_count_from_answer(
+                        recent_text, self._counting_options
+                    )
+                    z3_count = 0
+
+                    logger.info(
+                        f"[SpatialMap Phase 2b] Cardinal count check: "
+                        f"model={model_count}, expected={z3_count}, "
+                        f"direction={direction}, reference={reference}"
+                    )
+
+                    if (
+                        model_count is not None
+                        and model_count != z3_count
+                    ):
+                        if not self._count_feedback_given:
+                            self._count_feedback_given = True
+
+                            if direction in ("north", "south"):
+                                diag_examples = "northeast or northwest"
+                            elif direction == "west":
+                                diag_examples = "northwest or southwest"
+                            else:  # east
+                                diag_examples = "northeast or southeast"
+
+                            feedback = (
+                                f"\n\n[VERIFIER FEEDBACK: Count mismatch!\n"
+                                f"  You answered {model_count} objects "
+                                f"'{direction}' of {reference}, but the "
+                                f"correct count is {z3_count}.\n"
+                                f"  IMPORTANT: '{direction.title()}' means "
+                                f"STRICTLY and EXACTLY {direction} — it "
+                                f"does NOT include diagonal directions "
+                                f"like {diag_examples}.\n"
+                                f"  An object that is Northwest of "
+                                f"{reference} is NOT North of {reference}"
+                                f" and NOT West of {reference}.\n"
+                                f"  Since all given relationships in this "
+                                f"problem are diagonal (NE/NW/SE/SW), no "
+                                f"object can be strictly "
+                                f"'{direction.title()}' of {reference}.\n"
+                                f"  The correct count is {z3_count}. "
+                                f"Please select the option for 0.]\n\n"
+                                f">>> STEP 3: ANSWER\n"
+                            )
+                        else:
+                            correct_option = None
+                            for opt, val in self._counting_options.items():
+                                if val == "0":
+                                    correct_option = opt
+                                    break
+                            if correct_option:
+                                feedback = (
+                                    f"\nThe correct answer is 0. "
+                                    f"\\boxed{{{correct_option}}}"
+                                )
+                            else:
+                                feedback = (
+                                    f"\nThe correct answer is 0. "
+                                    f"\\boxed{{0}}"
+                                )
+
+                        logger.info(
+                            f"[SpatialMap Phase 2b] Cardinal count "
+                            f"mismatch: model={model_count}, "
+                            f"expected=0. Injecting feedback "
+                            f"(attempt={'1st' if not self._count_feedback_given else '2nd'})."
+                        )
+                        if not event.is_set():
+                            event_info["generated_text"] = step
+                            event_info["feedback"] = feedback
+                            event_info["correction_index"] = token_index
+                            event_info["errors"] = [
+                                f"Cardinal count mismatch: expected 0, "
+                                f"got {model_count}"
+                            ]
+                            event_info["phase"] = "standard_verify"
+                            event.set()
+                        return step, feedback
+
+                else:
+                    # --- Diagonal: use Z3 range check ---
+                    if not self._diag_count_feedback_given:
+                        model_count = parse_model_count_from_answer(
+                            recent_text, self._counting_options
+                        )
+                        count_range = get_possible_count_range(
+                            self.z3_solver, reference, direction
+                        )
+
+                        if (
+                            model_count is not None
+                            and count_range is not None
+                        ):
+                            min_c, max_c = count_range
+                            logger.info(
+                                f"[SpatialMap Phase 2b] Diagonal count "
+                                f"check: model={model_count}, "
+                                f"range=[{min_c}, {max_c}], "
+                                f"direction={direction}, "
+                                f"reference={reference}"
+                            )
+
+                            if not (min_c <= model_count <= max_c):
+                                self._diag_count_feedback_given = True
+                                # Find valid MCQ options
+                                valid_opts = []
+                                for opt, val in (
+                                    self._counting_options.items()
+                                ):
+                                    try:
+                                        v = int(val)
+                                        if min_c <= v <= max_c:
+                                            valid_opts.append(
+                                                (opt, v)
+                                            )
+                                    except (ValueError, TypeError):
+                                        pass
+
+                                if len(valid_opts) == 1:
+                                    feedback = (
+                                        f"\n\n[VERIFIER FEEDBACK: "
+                                        f"Count error!\n"
+                                        f"  {model_count} objects "
+                                        f"'{direction}' of {reference}"
+                                        f" is impossible.\n"
+                                        f"  The valid count is "
+                                        f"{valid_opts[0][1]}.\n"
+                                        f"  Please select option "
+                                        f"{valid_opts[0][0]}.]\n\n"
+                                        f">>> STEP 3: ANSWER\n"
+                                    )
+                                else:
+                                    feedback = (
+                                        f"\n\n[VERIFIER FEEDBACK: "
+                                        f"Count error!\n"
+                                        f"  {model_count} objects "
+                                        f"'{direction}' of {reference}"
+                                        f" is impossible.\n"
+                                        f"  The possible count range "
+                                        f"is [{min_c}, {max_c}].\n"
+                                        f"  Please reconsider and "
+                                        f"choose the correct "
+                                        f"option.]\n\n"
+                                        f">>> STEP 3: ANSWER\n"
+                                    )
+
+                                if not event.is_set():
+                                    event_info["generated_text"] = step
+                                    event_info["feedback"] = feedback
+                                    event_info["correction_index"] = (
+                                        token_index
+                                    )
+                                    event_info["errors"] = [
+                                        f"Diagonal count "
+                                        f"{model_count} outside "
+                                        f"range [{min_c}, {max_c}]"
+                                    ]
+                                    event_info["phase"] = (
+                                        "standard_verify"
+                                    )
+                                    event.set()
+                                return step, feedback
+
             logger.info(
                 f"[SpatialMap Phase 2b] Boxed answer found. Stopping."
             )
