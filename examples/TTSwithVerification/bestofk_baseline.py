@@ -29,6 +29,7 @@ class SampleResult:
     message: str
     tokens: int
     critic_correct: Optional[bool] = None
+    critic_feedback: Optional[str] = None
 
 
 def get_model_short_name(model_name: str) -> str:
@@ -86,6 +87,8 @@ def save_outputs(idx: int, outputs: List[SampleResult], best_idx: int, output_di
             f.write(f"EXTRACTED={result.extracted}\n")
             f.write(f"TOKENS={result.tokens}\n")
             f.write(f"MESSAGE={result.message}\n")
+            if result.critic_feedback:
+                f.write(f"CRITIC_FEEDBACK={result.critic_feedback}\n")
             f.write("\n")
             f.write(result.output)
             f.write("\n")
@@ -292,25 +295,31 @@ def resolve_indices(task, dataset_len, args):
     return range(start, end)
 
 
-def run_k_samples(prompt, llm_server, k, seed):
-    outputs = []
+async def run_k_samples_async(prompt, llm_server, k, seed):
+    """Parallelized version - runs all k samples concurrently."""
+    tasks = []
     for i in range(k):
         llm_server["payload"]["seed"] = seed + i
-        outputs.append(asyncio.run(stream_completion(
+        tasks.append(stream_completion(
             prompt,
             llm_server=llm_server,
             monitors=(),
             add_delay=False,
             termination_requires_validation=False,
             async_execution=True,
-        )))
-    return outputs
+        ))
+    return await asyncio.gather(*tasks)
+
+
+def run_k_samples(prompt, llm_server, k, seed):
+    """Wrapper to run parallelized k samples."""
+    return asyncio.run(run_k_samples_async(prompt, llm_server, k, seed))
 
 
 # --------------------- Critic model helpers ---------------------
 
 def build_game24_critic_prompt(nums, reasoning_output):
-    """Build critic prompt to evaluate Game of 24 solution."""
+    """Build critic prompt to evaluate Game of 24 solution and provide reasoning."""
     return f"""You are a math verifier. Evaluate the following Game of 24 solution.
 
 Numbers: {nums}
@@ -324,12 +333,17 @@ Verify:
 2. Does each step follow correct arithmetic?
 3. Does the final expression evaluate to exactly 24?
 
-Respond with ONLY: "CORRECT" or "INCORRECT"
+Respond in the following format:
+VERDICT: CORRECT or INCORRECT
+REASONING: Your detailed explanation
+
+If CORRECT, briefly explain why.
+If INCORRECT, explain what went wrong and how to fix it.
 """
 
 
 def build_mcq_critic_prompt(task, task_description, reasoning_output):
-    """Build critic prompt to evaluate MCQ solution."""
+    """Build critic prompt to evaluate MCQ solution and provide reasoning."""
     task_name = "Maze" if task == "maze" else "Spatial Reasoning"
     return f"""You are an expert {task_name} verifier. Evaluate the following solution.
 
@@ -341,12 +355,17 @@ Student's reasoning and answer:
 
 Verify the correctness of the step-by-step reasoning and final answer.
 
-Respond with ONLY: "CORRECT" or "INCORRECT"
+Respond in the following format:
+VERDICT: CORRECT or INCORRECT
+REASONING: Your detailed explanation
+
+If CORRECT, briefly explain why.
+If INCORRECT, explain what went wrong and suggest the correct approach.
 """
 
 
 async def evaluate_with_critic(output_text, task, example, critic_llm_server, tokenizer, nums=None):
-    """Use critic model to evaluate correctness of output."""
+    """Use critic model to evaluate correctness of output and extract reasoning feedback."""
     try:
         if task == "game24":
             critic_prompt = build_game24_critic_prompt(nums, output_text)
@@ -370,7 +389,15 @@ async def evaluate_with_critic(output_text, task, example, critic_llm_server, to
         )
         
         is_correct = "CORRECT" in critic_output.upper()
-        return is_correct, critic_output
+        
+        # Extract reasoning from verdict and reasoning format
+        reasoning = ""
+        if "REASONING:" in critic_output:
+            reasoning = critic_output.split("REASONING:", 1)[1].strip()
+        elif "VERDICT:" not in critic_output:
+            reasoning = critic_output
+        
+        return is_correct, reasoning
     except Exception as e:
         logger.warning(f"Critic evaluation failed: {e}")
         return False, ""
@@ -390,6 +417,22 @@ def run_k_samples_with_critic(
     early_stop=False,
 ):
     """Run up to K samples, evaluate with critic, and score with ground truth."""
+    if early_stop:
+        # Sequential execution for early stopping
+        return _run_k_samples_with_critic_sequential(
+            prompt, llm_server, critic_llm_server, k, seed, task, example, tokenizer, eval_fn, nums
+        )
+    else:
+        # Parallelized execution when not using early stopping
+        return asyncio.run(_run_k_samples_with_critic_parallel(
+            prompt, llm_server, critic_llm_server, k, seed, task, example, tokenizer, eval_fn, nums
+        ))
+
+
+def _run_k_samples_with_critic_sequential(
+    prompt, llm_server, critic_llm_server, k, seed, task, example, tokenizer, eval_fn, nums=None
+):
+    """Sequential version - required for early stopping."""
     sample_results = []
     for i in range(k):
         llm_server["payload"]["seed"] = seed + i
@@ -402,7 +445,7 @@ def run_k_samples_with_critic(
             async_execution=True,
         ))
 
-        critic_correct, critic_response = asyncio.run(evaluate_with_critic(
+        critic_correct, critic_feedback = asyncio.run(evaluate_with_critic(
             output, task, example, critic_llm_server, tokenizer, nums=nums
         ))
         is_correct, extracted, message = eval_fn(output)
@@ -415,10 +458,56 @@ def run_k_samples_with_critic(
             message=f"Critic verdict: {'CORRECT' if critic_correct else 'INCORRECT'} | {message}",
             tokens=token_count,
             critic_correct=critic_correct,
+            critic_feedback=critic_feedback,
         ))
 
-        if early_stop and critic_correct:
+        if critic_correct:
             break
+
+    return sample_results
+
+
+async def _run_k_samples_with_critic_parallel(
+    prompt, llm_server, critic_llm_server, k, seed, task, example, tokenizer, eval_fn, nums=None
+):
+    """Parallelized version - runs all k samples concurrently and evaluates with critic."""
+    # Step 1: Generate all outputs in parallel
+    output_tasks = []
+    for i in range(k):
+        llm_server["payload"]["seed"] = seed + i
+        output_tasks.append(stream_completion(
+            prompt,
+            llm_server=llm_server,
+            monitors=(),
+            add_delay=False,
+            termination_requires_validation=False,
+            async_execution=True,
+        ))
+    outputs = await asyncio.gather(*output_tasks)
+
+    # Step 2: Evaluate all outputs in parallel
+    evaluation_tasks = []
+    for output in outputs:
+        evaluation_tasks.append(evaluate_with_critic(
+            output, task, example, critic_llm_server, tokenizer, nums=nums
+        ))
+    critic_evaluations = await asyncio.gather(*evaluation_tasks)
+
+    # Step 3: Compile results
+    sample_results = []
+    for output, (critic_correct, critic_feedback) in zip(outputs, critic_evaluations):
+        is_correct, extracted, message = eval_fn(output)
+        token_count = count_tokens(output, tokenizer)
+
+        sample_results.append(SampleResult(
+            output=output,
+            correct=is_correct,
+            extracted=extracted,
+            message=f"Critic verdict: {'CORRECT' if critic_correct else 'INCORRECT'} | {message}",
+            tokens=token_count,
+            critic_correct=critic_correct,
+            critic_feedback=critic_feedback,
+        ))
 
     return sample_results
 
@@ -442,6 +531,7 @@ if __name__ == "__main__":
     parser.add_argument("--critic_model", type=str, default=MAIN_MODEL, help="Critic model to use for evaluation")
     parser.add_argument("--critic_port", type=int, default=8000, help="vLLM server port for critic model (default: same as main model port)")
     parser.add_argument("--critic_early_stop", action="store_true", help="Stop sampling after first critic-correct trace")
+    parser.add_argument("--critic_feedback_baseline", action="store_true", help="Use critic feedback as a separate baseline for post-hoc correction")
     parser.add_argument("--seed", type=int, default=42, help="Base random seed")
     parser.add_argument("--max_tokens", type=int, default=32768, help="Max tokens for generation")
     parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
@@ -563,10 +653,12 @@ if __name__ == "__main__":
             "best_critic_correct": best_result.critic_correct,
             "best_extracted": best_result.extracted,
             "best_message": best_result.message,
+            "best_critic_feedback": best_result.critic_feedback,
             "best_tokens": best_result.tokens,
             "all_tokens": [r.tokens for r in sample_results],
             "all_correct": [r.correct for r in sample_results],
             "all_critic_correct": [r.critic_correct for r in sample_results],
+            "all_critic_feedback": [r.critic_feedback for r in sample_results],
             "options": options,
         })
 
@@ -601,6 +693,7 @@ if __name__ == "__main__":
         summary["critic_model"] = args.critic_model
         summary["critic_port"] = args.critic_port
         summary["critic_early_stop"] = args.critic_early_stop
+        summary["critic_feedback_baseline"] = args.critic_feedback_baseline
 
     summary_path = os.path.join(output_dirs["base"], "summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:
