@@ -4,10 +4,14 @@ import json
 import logging
 import os
 import re
+import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
+import pandas as pd
+import aiohttp
 from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoTokenizer
@@ -15,10 +19,28 @@ from transformers import AutoTokenizer
 from interwhen import stream_completion
 
 # ============== MODEL CONFIGURATION ==============
-MAIN_MODEL = "Qwen/Qwen3-30B-A3B-Thinking-2507"
-# =================================================
+MAIN_MODEL = "Qwen/QwQ-32B"
+# Multi-process vLLM configuration
+VLLM_PORTS = [8000, 8001, 8002, 8003]  # 4 instances with tensor-parallel-size 2 each
+REQUEST_COUNTER = {"main": 0, "critic": 0}  # Track request count for round-robin load balancing
+
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def suppress_output():
+    """Context manager to suppress stdout and stderr."""
+    with open(os.devnull, 'w') as devnull:
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        sys.stdout = devnull
+        sys.stderr = devnull
+        try:
+            yield
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
 
 
 @dataclass
@@ -37,15 +59,27 @@ def get_model_short_name(model_name: str) -> str:
     return short_name.replace(" ", "_").replace(":", "-")
 
 
-def get_output_dirs(task: str, main_model: str, base_dir: str = "../../b-pchanda/Outputs_TTS/BestOfKResults"):
+def get_next_port(server_type: str = "main") -> int:
+    """Get next vLLM port in round-robin fashion."""
+    global REQUEST_COUNTER
+    port = VLLM_PORTS[REQUEST_COUNTER[server_type] % len(VLLM_PORTS)]
+    REQUEST_COUNTER[server_type] += 1
+    return port
+
+
+def get_output_dirs(task: str, main_model: str, use_critic: bool, critic_early_stop: bool, base_dir: str = "../../b-pchanda/Outputs_TTS/BestOfKResults"):
     model_short_name = get_model_short_name(main_model)
-    output_base = os.path.join(base_dir, task, model_short_name)
+    critic_status = "on" if use_critic else "off"
+    earlystop_status = "on" if critic_early_stop else "off"
+    output_base = os.path.join(base_dir, task, model_short_name, f"critic_{critic_status}", f"earlystop_{earlystop_status}")
     dirs = {
         "base": output_base,
         "reasoning": os.path.join(output_base, "Reasoning_output"),
+        "critic": os.path.join(output_base, "Critic_output") if use_critic else None,
     }
     for dir_path in dirs.values():
-        os.makedirs(dir_path, exist_ok=True)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
     return dirs
 
 
@@ -59,7 +93,7 @@ def init_llm_server(model_name, max_tokens=32768, port=8000, temperature=0.6, se
         "min_p": 0.0,
         "do_sample": True,
         "temperature": temperature,
-        "stream": True,
+        "stream": False,
         "logprobs": 20,
         "use_beam_search": False,
         "prompt_cache": True,
@@ -70,8 +104,16 @@ def init_llm_server(model_name, max_tokens=32768, port=8000, temperature=0.6, se
 
 
 def count_tokens(text: str, tokenizer) -> int:
-    tokens = tokenizer.encode(text, add_special_tokens=False)
-    return len(tokens)
+    """Count tokens in text, with fallback to character count."""
+    try:
+        if not text or len(text.strip()) == 0:
+            return 0
+        tokens = tokenizer.encode(text, add_special_tokens=False)
+        return len(tokens)
+    except Exception as e:
+        logger.warning(f"Tokenization failed: {e}, using character count estimate")
+        # Rough estimate: ~4 characters per token
+        return max(1, len(text) // 4)
 
 
 def save_outputs(idx: int, outputs: List[SampleResult], best_idx: int, output_dir: str):
@@ -92,7 +134,7 @@ def save_outputs(idx: int, outputs: List[SampleResult], best_idx: int, output_di
             f.write("\n")
             f.write(result.output)
             f.write("\n")
-    logger.info(f"Saved outputs to {filepath}")
+    # logger.info(f"Saved outputs to {filepath}")
 
 
 # --------------------- Game24 helpers ---------------------
@@ -211,14 +253,30 @@ def build_spatialmap_prompt(example):
 
 
 def extract_solution_mcq(text):
-    matches = re.findall(r"\\boxed\{([^}]*)\}", text)
-    if not matches:
-        return None
-    expr = matches[-1].strip()
-    choice_match = re.search(r"\b([ABCD])\b", expr, flags=re.IGNORECASE)
-    if not choice_match:
-        return None
-    return choice_match.group(1).upper()
+    """Extract MCQ solution from model output."""
+    # Try multiple boxed patterns
+    patterns = [
+        r"\\boxed\{([^}]*)\}",  # \boxed{...}
+        r"boxed\{([^}]*)\}",     # boxed{...} without escape
+        r"\*\*([A-D])\*\*",      # **A** format
+        r"answer[:\s]*([A-D])",  # answer: A format
+        r"(?:^|\n)([A-D])(?:\s|$|\.)",  # Standalone letter
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        if matches:
+            expr = matches[-1].strip()
+            choice_match = re.search(r"\b([ABCD])\b", expr, flags=re.IGNORECASE)
+            if choice_match:
+                return choice_match.group(1).upper()
+    
+    # Last resort: look for any standalone A, B, C, or D
+    standalone = re.findall(r"\b([ABCD])\b", text)
+    if standalone:
+        return standalone[-1].upper()
+    
+    return None
 
 
 def extract_options_from_prompt(prompt_text, target_options):
@@ -269,7 +327,7 @@ def load_dataset_for_task(task):
     if task == "game24":
         return load_dataset("nlile/24-game", split="train")
     if task == "maze":
-        return load_dataset("microsoft/VISION_LANGUAGE", "maze", split="val")
+        return load_dataset("microsoft/VISION_LANGUAGE", "maze_text_only", split="val")
     if task == "spatialmap":
         return load_dataset("microsoft/VISION_LANGUAGE", "spatial_map_text_only", split="val")
     raise ValueError(f"Unsupported task: {task}")
@@ -295,25 +353,75 @@ def resolve_indices(task, dataset_len, args):
     return range(start, end)
 
 
-async def run_k_samples_async(prompt, llm_server, k, seed):
-    """Parallelized version - runs all k samples concurrently."""
-    tasks = []
+def batch_generate_samples(prompt, llm_server, k, seed, quiet=True):
+    """Generate k samples using vLLM batch processing via API across multiple instances."""
+    payload_template = llm_server["payload"].copy()
+    headers = llm_server["headers"]
+    
+    # Create k requests with different seeds
+    batch_payloads = []
     for i in range(k):
-        llm_server["payload"]["seed"] = seed + i
-        tasks.append(stream_completion(
-            prompt,
-            llm_server=llm_server,
-            monitors=(),
-            add_delay=False,
-            termination_requires_validation=False,
-            async_execution=True,
-        ))
-    return await asyncio.gather(*tasks)
+        payload = payload_template.copy()
+        payload["prompt"] = prompt
+        payload["seed"] = seed + i
+        batch_payloads.append(payload)
+    
+    # Send requests to vLLM instances in parallel (true concurrency)
+    async def _fetch_one(session, sem, idx, url, payload):
+        async with sem:
+            try:
+                async with session.post(url, json=payload, headers=headers, timeout=300) as resp:
+                    text = await resp.text()
+                    if resp.status >= 400:
+                        logger.warning(f"HTTP error for seed {seed + idx} on {url}: {resp.status} - {text[:200]}")
+                        return idx, ""
+                    try:
+                        result = json.loads(text)
+                    except json.JSONDecodeError:
+                        logger.warning(f"Invalid JSON for seed {seed + idx} on {url}")
+                        return idx, ""
+            except Exception as e:
+                logger.warning(f"Batch generation failed for seed {seed + idx} on {url}: {e}")
+                return idx, ""
 
+            if "choices" in result and len(result["choices"]) > 0:
+                choice = result["choices"][0]
+                if isinstance(choice, dict):
+                    output_text = choice.get("text") or choice.get("message", {}).get("content", "")
+                else:
+                    output_text = str(choice)
+                if output_text and len(output_text.strip()) > 0:
+                    return idx, output_text
+                logger.warning(f"Empty output for seed {seed + idx} on {url}")
+                return idx, ""
 
-def run_k_samples(prompt, llm_server, k, seed):
-    """Wrapper to run parallelized k samples."""
-    return asyncio.run(run_k_samples_async(prompt, llm_server, k, seed))
+            logger.warning(f"No choices in response for seed {seed + idx} on {url}: {result.keys() if isinstance(result, dict) else type(result)}")
+            return idx, ""
+
+    async def _run_parallel():
+        sem = asyncio.Semaphore(len(VLLM_PORTS))
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            for i, payload in enumerate(batch_payloads):
+                port = get_next_port(server_type="main")
+                url = f"http://localhost:{port}/v1/completions"
+                tasks.append(asyncio.create_task(_fetch_one(session, sem, i, url, payload)))
+            results = await asyncio.gather(*tasks)
+            return results
+
+    if quiet:
+        with suppress_output():
+            results = asyncio.run(_run_parallel())
+    else:
+        results = asyncio.run(_run_parallel())
+
+    outputs = [""] * k
+    for idx, output_text in results:
+        outputs[idx] = output_text
+        if output_text and not quiet:
+            print(f"[Generated sample {idx}] {len(output_text)} chars, {len(output_text.split())} words")
+
+    return outputs
 
 
 # --------------------- Critic model helpers ---------------------
@@ -364,43 +472,86 @@ If INCORRECT, explain what went wrong and suggest the correct approach.
 """
 
 
-async def evaluate_with_critic(output_text, task, example, critic_llm_server, tokenizer, nums=None):
-    """Use critic model to evaluate correctness of output and extract reasoning feedback."""
-    try:
-        if task == "game24":
-            critic_prompt = build_game24_critic_prompt(nums, output_text)
-        else:
-            if task == "maze":
-                _, task_desc = build_maze_prompt(example)
+def batch_evaluate_with_critic(outputs_df, task, example, critic_llm_server, tokenizer, nums=None, quiet=True):
+    """Batch evaluate outputs using vLLM API across multiple instances. Outputs_df should have columns: 'output', 'seed_idx'"""
+    payload_template = critic_llm_server["payload"].copy()
+    headers = critic_llm_server["headers"]
+
+    async def _fetch_one(session, sem, idx, url, payload):
+        async with sem:
+            try:
+                async with session.post(url, json=payload, headers=headers, timeout=300) as resp:
+                    text = await resp.text()
+                    if resp.status >= 400:
+                        logger.warning(f"HTTP error for critic sample {idx} on {url}: {resp.status} - {text[:200]}")
+                        return idx, "", False
+                    try:
+                        result = json.loads(text)
+                    except json.JSONDecodeError:
+                        logger.warning(f"Invalid JSON for critic sample {idx} on {url}")
+                        return idx, "", False
+            except Exception as e:
+                logger.warning(f"Critic evaluation failed for sample {idx} on {url}: {e}")
+                return idx, "", False
+
+            if "choices" in result and len(result["choices"]) > 0:
+                choice = result["choices"][0]
+                critic_output = choice.get("text") or choice.get("message", {}).get("content", "")
             else:
-                _, task_desc = build_spatialmap_prompt(example)
-            critic_prompt = build_mcq_critic_prompt(task, task_desc, output_text)
-        
-        critic_system = "You are a strict academic verifier."
-        full_prompt = f"<|im_start|>system\n{critic_system}<|im_end|>\n<|im_start|>user\n{critic_prompt}<|im_end|>\n<|im_start|>assistant\n"
-        
-        critic_output = await stream_completion(
-            full_prompt,
-            llm_server=critic_llm_server,
-            monitors=(),
-            add_delay=False,
-            termination_requires_validation=False,
-            async_execution=True,
-        )
-        
-        is_correct = "CORRECT" in critic_output.upper()
-        
-        # Extract reasoning from verdict and reasoning format
-        reasoning = ""
-        if "REASONING:" in critic_output:
-            reasoning = critic_output.split("REASONING:", 1)[1].strip()
-        elif "VERDICT:" not in critic_output:
-            reasoning = critic_output
-        
-        return is_correct, reasoning
-    except Exception as e:
-        logger.warning(f"Critic evaluation failed: {e}")
-        return False, ""
+                critic_output = ""
+
+            is_correct = "CORRECT" in critic_output.upper()
+            reasoning = ""
+            if "REASONING:" in critic_output:
+                reasoning = critic_output.split("REASONING:", 1)[1].strip()
+            elif "VERDICT:" not in critic_output:
+                reasoning = critic_output
+
+            return idx, reasoning, is_correct
+
+    async def _run_parallel():
+        sem = asyncio.Semaphore(len(VLLM_PORTS))
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            for idx, row in outputs_df.iterrows():
+                output_text = row["output"]
+                if task == "game24":
+                    critic_prompt = build_game24_critic_prompt(nums, output_text)
+                else:
+                    if task == "maze":
+                        _, task_desc = build_maze_prompt(example)
+                    else:
+                        _, task_desc = build_spatialmap_prompt(example)
+                    critic_prompt = build_mcq_critic_prompt(task, task_desc, output_text)
+
+                critic_system = "You are a strict academic verifier."
+                full_prompt = f"<|im_start|>system\n{critic_system}<|im_end|>\n<|im_start|>user\n{critic_prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+                payload = payload_template.copy()
+                payload["prompt"] = full_prompt
+                payload["seed"] = row.get("critic_seed", idx)
+
+                port = get_next_port(server_type="critic")
+                url = f"http://localhost:{port}/v1/completions"
+                tasks.append(asyncio.create_task(_fetch_one(session, sem, idx, url, payload)))
+
+            return await asyncio.gather(*tasks)
+
+    if quiet:
+        with suppress_output():
+            results = asyncio.run(_run_parallel())
+    else:
+        results = asyncio.run(_run_parallel())
+
+    rows = []
+    for sample_idx, reasoning, is_correct in results:
+        rows.append({
+            "sample_idx": sample_idx,
+            "critic_correct": is_correct,
+            "critic_feedback": reasoning,
+        })
+
+    return pd.DataFrame(rows)
 
 
 def run_k_samples_with_critic(
@@ -415,101 +566,84 @@ def run_k_samples_with_critic(
     eval_fn,
     nums=None,
     early_stop=False,
+    quiet=True,
 ):
-    """Run up to K samples, evaluate with critic, and score with ground truth."""
+    """Run k samples with critic evaluation using vLLM batching."""
+    # Generate k samples
+    outputs = batch_generate_samples(prompt, llm_server, k, seed, quiet=quiet)
+    
+    # Create dataframe with outputs
+    df_samples = pd.DataFrame({
+        "sample_idx": range(k),
+        "output": outputs,
+        "seed": [seed + i for i in range(k)],
+    })
+    
+    # If early stop mode, stop at first critic-correct
     if early_stop:
-        # Sequential execution for early stopping
-        return _run_k_samples_with_critic_sequential(
-            prompt, llm_server, critic_llm_server, k, seed, task, example, tokenizer, eval_fn, nums
-        )
+        sample_results = []
+        for idx, row in df_samples.iterrows():
+            output = row["output"]
+            
+            # Evaluate with critic
+            df_critic = batch_evaluate_with_critic(
+                pd.DataFrame([{"output": output, "seed_idx": idx}]),
+                task, example, critic_llm_server, tokenizer, nums=nums, quiet=quiet
+            )
+            critic_correct = df_critic.iloc[0]["critic_correct"] if len(df_critic) > 0 else False
+            critic_feedback = df_critic.iloc[0]["critic_feedback"] if len(df_critic) > 0 else ""
+            
+            # Evaluate with ground truth
+            is_correct, extracted, message = eval_fn(output)
+            token_count = count_tokens(output, tokenizer)
+            
+            sample_results.append(SampleResult(
+                output=output,
+                correct=is_correct,
+                extracted=extracted,
+                message=f"Critic verdict: {'CORRECT' if critic_correct else 'INCORRECT'} | {message}",
+                tokens=token_count,
+                critic_correct=critic_correct,
+                critic_feedback=critic_feedback,
+            ))
+            
+            if critic_correct:
+                break
+        
+        return sample_results
     else:
-        # Parallelized execution when not using early stopping
-        return asyncio.run(_run_k_samples_with_critic_parallel(
-            prompt, llm_server, critic_llm_server, k, seed, task, example, tokenizer, eval_fn, nums
-        ))
+        # Batch critic evaluation
+        df_critic = batch_evaluate_with_critic(
+            df_samples, task, example, critic_llm_server, tokenizer, nums=nums, quiet=quiet
+        )
+        
+        # Merge critic results
+        df_samples = df_samples.merge(df_critic, left_index=True, right_on="sample_idx", how="left")
+        
+        # Process all results
+        sample_results = []
+        for idx, row in df_samples.iterrows():
+            output = row["output"]
+            critic_correct = row.get("critic_correct", False)
+            critic_feedback = row.get("critic_feedback", "")
+            
+            is_correct, extracted, message = eval_fn(output)
+            token_count = count_tokens(output, tokenizer)
+            
+            sample_results.append(SampleResult(
+                output=output,
+                correct=is_correct,
+                extracted=extracted,
+                message=f"Critic verdict: {'CORRECT' if critic_correct else 'INCORRECT'} | {message}",
+                tokens=token_count,
+                critic_correct=critic_correct,
+                critic_feedback=critic_feedback,
+            ))
+        
+        return sample_results
 
 
-def _run_k_samples_with_critic_sequential(
-    prompt, llm_server, critic_llm_server, k, seed, task, example, tokenizer, eval_fn, nums=None
-):
-    """Sequential version - required for early stopping."""
-    sample_results = []
-    for i in range(k):
-        llm_server["payload"]["seed"] = seed + i
-        output = asyncio.run(stream_completion(
-            prompt,
-            llm_server=llm_server,
-            monitors=(),
-            add_delay=False,
-            termination_requires_validation=False,
-            async_execution=True,
-        ))
 
-        critic_correct, critic_feedback = asyncio.run(evaluate_with_critic(
-            output, task, example, critic_llm_server, tokenizer, nums=nums
-        ))
-        is_correct, extracted, message = eval_fn(output)
-        token_count = count_tokens(output, tokenizer)
-
-        sample_results.append(SampleResult(
-            output=output,
-            correct=is_correct,
-            extracted=extracted,
-            message=f"Critic verdict: {'CORRECT' if critic_correct else 'INCORRECT'} | {message}",
-            tokens=token_count,
-            critic_correct=critic_correct,
-            critic_feedback=critic_feedback,
-        ))
-
-        if critic_correct:
-            break
-
-    return sample_results
-
-
-async def _run_k_samples_with_critic_parallel(
-    prompt, llm_server, critic_llm_server, k, seed, task, example, tokenizer, eval_fn, nums=None
-):
-    """Parallelized version - runs all k samples concurrently and evaluates with critic."""
-    # Step 1: Generate all outputs in parallel
-    output_tasks = []
-    for i in range(k):
-        llm_server["payload"]["seed"] = seed + i
-        output_tasks.append(stream_completion(
-            prompt,
-            llm_server=llm_server,
-            monitors=(),
-            add_delay=False,
-            termination_requires_validation=False,
-            async_execution=True,
-        ))
-    outputs = await asyncio.gather(*output_tasks)
-
-    # Step 2: Evaluate all outputs in parallel
-    evaluation_tasks = []
-    for output in outputs:
-        evaluation_tasks.append(evaluate_with_critic(
-            output, task, example, critic_llm_server, tokenizer, nums=nums
-        ))
-    critic_evaluations = await asyncio.gather(*evaluation_tasks)
-
-    # Step 3: Compile results
-    sample_results = []
-    for output, (critic_correct, critic_feedback) in zip(outputs, critic_evaluations):
-        is_correct, extracted, message = eval_fn(output)
-        token_count = count_tokens(output, tokenizer)
-
-        sample_results.append(SampleResult(
-            output=output,
-            correct=is_correct,
-            extracted=extracted,
-            message=f"Critic verdict: {'CORRECT' if critic_correct else 'INCORRECT'} | {message}",
-            tokens=token_count,
-            critic_correct=critic_correct,
-            critic_feedback=critic_feedback,
-        ))
-
-    return sample_results
 
 
 if __name__ == "__main__":
@@ -538,11 +672,16 @@ if __name__ == "__main__":
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 
-    log_level = logging.DEBUG if args.debug else logging.INFO
+    log_level = logging.DEBUG if args.debug else logging.ERROR
     logging.basicConfig(level=log_level, format="%(message)s")
 
+    quiet_mode = not args.debug
 
-    dataset = load_dataset_for_task(args.task)
+    if quiet_mode:
+        with suppress_output():
+            dataset = load_dataset_for_task(args.task)
+    else:
+        dataset = load_dataset_for_task(args.task)
     indices = resolve_indices(args.task, len(dataset), args)
 
     llm_server = init_llm_server(
@@ -562,13 +701,17 @@ if __name__ == "__main__":
             temperature=0.2,
             seed=args.seed,
         )
-        logger.info(f"Using critic model: {args.critic_model} on port {args.critic_port}")
+        # logger.info(f"Using critic model: {args.critic_model} on port {args.critic_port}")
 
-    logger.info(f"Loading tokenizer for {args.main_model}...")
-    tokenizer = AutoTokenizer.from_pretrained(args.main_model, trust_remote_code=True)
-    logger.info("Tokenizer loaded successfully.")
+    # logger.info(f"Loading tokenizer for {args.main_model}...")
+    if quiet_mode:
+        with suppress_output():
+            tokenizer = AutoTokenizer.from_pretrained(args.main_model, trust_remote_code=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.main_model, trust_remote_code=True)
+    # logger.info("Tokenizer loaded successfully.")
 
-    output_dirs = get_output_dirs(args.task, args.main_model)
+    output_dirs = get_output_dirs(args.task, args.main_model, args.use_critic, args.critic_early_stop)
 
     total_examples = 0
     total_correct = 0
@@ -601,16 +744,18 @@ if __name__ == "__main__":
             options = extract_options_from_prompt(user_prompt, target_options)
             eval_fn = lambda output: evaluate_mcq_answer(output, options, gt)
 
-        logger.info(f"---- Example {idx} ----")
+        #logger.info(f"---- Example {idx} ----")
+        
+        quiet_mode = not args.debug
         
         if args.use_critic:
             sample_results = run_k_samples_with_critic(
                 prompt, llm_server, critic_llm_server, args.k, args.seed,
                 args.task, example, tokenizer, eval_fn, nums=(nums if args.task == "game24" else None),
-                early_stop=args.critic_early_stop
+                early_stop=args.critic_early_stop, quiet=quiet_mode
             )
         else:
-            outputs = run_k_samples(prompt, llm_server, args.k, args.seed)
+            outputs = batch_generate_samples(prompt, llm_server, args.k, args.seed, quiet=quiet_mode)
             sample_results = []
             for output in outputs:
                 is_correct, extracted, message = eval_fn(output)
@@ -662,8 +807,8 @@ if __name__ == "__main__":
             "options": options,
         })
 
-        logger.info(f"Best sample: {best_idx} | Correct in K: {any_correct}")
-        logger.info(f"Best message: {best_result.message}")
+        #logger.info(f"Best sample: {best_idx} | Correct in K: {any_correct}")
+        #logger.info(f"Best message: {best_result.message}")
 
     accuracy = total_correct / total_examples if total_examples else 0
     avg_best_tokens = total_tokens / total_examples if total_examples else 0
@@ -698,4 +843,4 @@ if __name__ == "__main__":
     summary_path = os.path.join(output_dirs["base"], "summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
-    logger.info(f"Saved summary to {summary_path}")
+    # logger.info(f"Saved summary to {summary_path}")
