@@ -347,7 +347,7 @@ def parse_directional_claims_from_text(text: str) -> List[Dict]:
     claims = []
     
     # Pattern: "X is (to the) DIRECTION of Y"
-    pattern = r"([A-Z][A-Za-z'][A-Za-z'\s]*?)\s+is\s+(?:to\s+the\s+)?(northwest|northeast|southwest|southeast|north|south|east|west)\s+of\s+([A-Z][A-Za-z'][A-Za-z'\s]*?)(?:\.|,|\s*[→✓✗]|\s*$|\s+(?:and|so|which|therefore|thus|but|\())"
+    pattern = r"([A-Z][A-Za-z'][A-Za-z'\s]*?)\s+is\s+(?:to\s+the\s+)?(northwest|northeast|southwest|southeast|north|south|east|west)\s+of\s+([A-Z][A-Za-z'][A-Za-z'\s]*?)(?:\.|,|;|:|\s*[→✓✗]|\s*\n|\s*$|\s+(?:and|so|which|therefore|thus|but|since|because|while|whereas|however|hence|then|for|as|meaning|indicating|implying|suggesting|confirming|\())"
     
     matches = re.finditer(pattern, expanded_text, re.IGNORECASE)
     
@@ -413,11 +413,16 @@ def verify_spatialmap_step(
     Args:
         claim: {"A": entity1, "direction": direction, "B": entity2}
         z3_solver: The Z3 solver with known constraints
-        add_if_valid: If True, add the claim to the solver if it's valid
+        add_if_valid: If True, add the claim to the solver **only if it
+            is entailed** (i.e. its negation is UNSAT).  Merely
+            satisfiable claims are accepted but NOT committed to the
+            solver so they cannot over-constrain future checks.
     
     Returns:
         (is_valid, errors)
     """
+    from z3 import Not as Z3Not, sat as z3sat
+
     errors = []
     
     is_consistent = z3_solver.check_with_new_constraint(claim)
@@ -430,7 +435,17 @@ def verify_spatialmap_step(
         return False, errors
     
     if add_if_valid:
-        z3_solver.apply_ir(claim)
+        # Only commit the claim if it is *entailed* (negation is UNSAT).
+        # This prevents merely-satisfiable-but-unproven claims from
+        # over-constraining the solver and blocking valid solutions later.
+        compiled = z3_solver.compile_constraint(claim)
+        if compiled is not None:
+            z3_solver.solver.push()
+            z3_solver.solver.add(Z3Not(compiled))
+            is_entailed = z3_solver.solver.check() != z3sat
+            z3_solver.solver.pop()
+            if is_entailed:
+                z3_solver.apply_ir(claim)
     
     return True, []
 

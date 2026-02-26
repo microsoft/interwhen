@@ -102,6 +102,9 @@ def build_prompt_from_example(example): #(original prompt config)
 
 
 def extract_solution(text):
+    # Strip injected <format>...</format> template blocks so we don't
+    # accidentally match the placeholder \boxed{LETTER} from the template.
+    text = re.sub(r'<format>.*?</format>', '', text, flags=re.DOTALL)
     matches = re.findall(r"\\boxed\{([^}]*)\}", text)
     if not matches:
         return None

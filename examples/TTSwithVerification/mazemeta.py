@@ -1,15 +1,11 @@
 """
-Maze experiment with thinking-phase step verification.
+Maze experiment with step-by-step verification using StepVerifierMazeMonitor.
 
-Uses ThinkingPhaseStepVerifierMazeMonitor which:
-  - Verifies the model's traced path during <think> via side-streams
-  - Injects a structured step format after </think> (no meta-prompt needed)
-  - Verifies each step as the model fills in the structured template
+Uses the new monitor-based architecture that integrates with stream_completion.
 """
 
 import argparse
 import asyncio
-import csv
 import json
 import logging
 import os
@@ -21,7 +17,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 
 from interwhen import stream_completion
-from interwhen.monitors import ThinkingPhaseStepVerifierMazeMonitor
+from interwhen.monitors import StepVerifierMazeMonitor
 from interwhen.utils.maze_verifier import parse_maze_from_prompt
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -39,7 +35,7 @@ def get_model_short_name(model_name: str) -> str:
     return short_name
 
 
-def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/MazeResults"):
+def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/MazeResults/metaPrompt"):
     """Create and return output directory paths based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
@@ -47,7 +43,6 @@ def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/MazeResu
     dirs = {
         "base": output_base,
         "reasoning": os.path.join(output_base, "Reasoning_output"),
-        "csv_saved": os.path.join(output_base, "csv_saved"),
     }
     
     for dir_path in dirs.values():
@@ -56,16 +51,108 @@ def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/MazeResu
     return dirs
 
 
-def build_simple_prompt(example):
-    """Build a simple user prompt from the maze example.
+def build_meta_prompt_from_example(example):
+    """Build prompt for maze example."""
+    system_prompt = """You are a maze-solving AI. Given a maze in ASCII format, analyze it step by step.
 
-    No system / meta prompt is used — the structured step format is
-    injected by the monitor after ``</think>``.
-    """
+COORDINATE SYSTEM:
+- Rows are numbered from top (row 0) to bottom
+- Columns are numbered from left (col 0) to right
+- Movement: UP (row decreases), DOWN (row increases), LEFT (col decreases), RIGHT (col increases)
+
+TURN DEFINITIONS:
+- RIGHT_TURN = 90° clockwise change (e.g., DOWN→LEFT, LEFT→UP, UP→RIGHT, RIGHT→DOWN)
+- LEFT_TURN = 90° counterclockwise change (e.g., DOWN→RIGHT, RIGHT→UP, UP→LEFT, LEFT→DOWN)
+
+RELATIVE POSITION DEFINITIONS:
+- "directly to the left" = same row, E has smaller column than S
+- "directly to the right" = same row, E has larger column than S
+- "directly above" = same column, E has smaller row than S
+- "directly below" = same column, E has larger row than S
+- "top left" = E has smaller row AND smaller column than S
+- "top right" = E has smaller row AND larger column than S
+- "bottom left" = E has larger row AND smaller column than S
+- "bottom right" = E has larger row AND larger column than S
+
+IMPORTANT: Follow the EXACT output format below. Do NOT use <think> tags.
+
+EXAMPLE 1: Counting Right Turns
+Question: How many right turns are there in the path from S to E?
+
+>>> LOCATE START AND EXIT:
+    S position: (3,5)
+    E position: (1,1)
+
+>>> STEP 1: Move DOWN from (3,5) to (4,5)
+    Current position: (4,5)
+    Previous direction: —
+    Current direction: DOWN
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=0
+
+>>> STEP 2: Move DOWN from (4,5) to (5,5)
+    Current position: (5,5)
+    Previous direction: DOWN
+    Current direction: DOWN
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=0
+
+>>> STEP 3: Move LEFT from (5,5) to (5,4)
+    Current position: (5,4)
+    Previous direction: DOWN
+    Current direction: LEFT
+    Turn type: RIGHT_TURN
+    Running count: Right=1, Left=0
+
+>>> FINAL ANSWER: Right turns = 2
+    \\boxed{C}
+
+EXAMPLE 2: Counting Total Turns
+Question: How many total turns are there in the path from S to E?
+
+>>> LOCATE START AND EXIT:
+    S position: (3,5)
+    E position: (1,1)
+
+>>> STEP 1: Move DOWN from (3,5) to (4,5)
+    Current position: (4,5)
+    Previous direction: —
+    Current direction: DOWN
+    Turn type: STRAIGHT
+    Running count: Right=0, Left=0, Total=0
+
+[... continue for all steps ...]
+
+>>> FINAL ANSWER: Total turns = 2
+    \\boxed{C}
+
+EXAMPLE 3: Relative Position
+Question: Is the exit (E) to the top left of the starting point (S)?
+
+>>> LOCATE START AND EXIT:
+    S position: (3,5)
+    E position: (1,1)
+
+>>> COMPARE POSITIONS:
+    Row comparison: E row (1) < S row (3) → E is ABOVE S ✓
+    Col comparison: E col (1) < S col (5) → E is LEFT of S ✓
+
+>>> ANALYSIS:
+    E is above S (smaller row): YES
+    E is left of S (smaller col): YES
+    Therefore E is at TOP LEFT of S.
+
+>>> ANSWER: YES, E is to the top left of S.
+    \\boxed{A}
+
+════════════════════════════════════════════════════════════════════════════════
+Now solve the following maze using the EXACT same format. First locate S and E, then trace the path step by step."""
+
+    # Get the maze description (trimmed to remove trailing instructions)
     description = str(example.get("prompt", ""))
-    # Trim trailing boiler-plate instructions that the dataset appends
     description_trimmed = description[:-143] if len(description) > 143 else description
-    return description_trimmed
+    
+    return system_prompt, description_trimmed
 
 
 def extract_solution(text: str) -> str:
@@ -74,10 +161,6 @@ def extract_solution(text: str) -> str:
         answer_section = text.split("</think>")[-1]
     else:
         answer_section = text
-    
-    # Strip injected <format>...</format> template blocks so we don't
-    # accidentally match the placeholder \boxed{LETTER} from the template.
-    answer_section = re.sub(r'<format>.*?</format>', '', answer_section, flags=re.DOTALL)
     
     matches = re.findall(r'\\boxed\{([^}]*)\}', answer_section)
     if matches:
@@ -96,20 +179,20 @@ def count_tokens(text: str, tokenizer) -> int:
     return len(tokens)
 
 
-# def get_question_type_from_index(idx: int) -> str:
-#     """Determine question type based on index range.
+def get_question_type_from_index(idx: int) -> str:
+    """Determine question type based on index range.
     
-#     Dataset structure:
-#     - 3000-3499: right turns
-#     - 3500-3999: total turns
-#     - 4000-4500: relative position
-#     """
-#     if idx < 3500:
-#         return "right_turns"
-#     elif idx < 4000:
-#         return "total_turns"
-#     else:
-#         return "relative_position"
+    Dataset structure:
+    - 3000-3499: right turns
+    - 3500-3999: total turns
+    - 4000-4500: relative position
+    """
+    if idx < 3500:
+        return "right_turns"
+    elif idx < 4000:
+        return "total_turns"
+    else:
+        return "relative_position"
 
 
 def init_llm_server(model_name, max_tokens=22000, port=8000):
@@ -139,31 +222,6 @@ def save_output(idx: int, output: str, output_dir: str):
     with open(filepath, 'w') as f:
         f.write(output)
     logger.info(f"Saved output to {filepath}")
-
-
-def save_prompt(idx, prompt_with_answer, reason_dir):
-    """Save reasoning trace to file."""
-    os.makedirs(reason_dir, exist_ok=True)
-    filename = os.path.join(reason_dir, f"reason_{idx}.txt")
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(prompt_with_answer)
-    logger.info(f"Saved reasoning trace to {filename}")
-
-
-def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_TTS/MazeResults") -> str:
-    """Generate log filename based on model name."""
-    model_short_name = get_model_short_name(main_model)
-    output_base = os.path.join(base_dir, model_short_name)
-    os.makedirs(output_base, exist_ok=True)
-    return os.path.join(output_base, f"EAT_{num_examples}examples.log")
-
-
-def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_TTS/MazeResults") -> str:
-    """Generate token CSV filename based on model name."""
-    model_short_name = get_model_short_name(main_model)
-    output_base = os.path.join(base_dir, model_short_name)
-    os.makedirs(output_base, exist_ok=True)
-    return os.path.join(output_base, f"EAT_{num_examples}examples.csv")
 
 def evaluate_maze_answer(answer, options, ground_truth):
     """
@@ -208,7 +266,7 @@ def evaluate_maze_answer(answer, options, ground_truth):
     return False, sol, f"Solution '{sol}' not found in options or ground truth"
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run maze experiments with step verification")
+    parser = argparse.ArgumentParser(description="Run maze experiments with StepVerifierMazeMonitor")
     parser.add_argument("--model", type=str, default=MAIN_MODEL,
                         help="Model name for generation")
     parser.add_argument("--indices", type=str, default=None,
@@ -221,15 +279,7 @@ if __name__ == "__main__":
                         help="Maximum number of correction attempts per example")
     parser.add_argument("--port", type=int, default=8000, help="vLLM server port")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logging")
-    parser.add_argument("--newline_threshold", type=int, default=20,
-                        help="Number of \\n\\n in thinking before triggering side verification")
-    parser.add_argument("--warmup", type=int, default=0,
-                        help="Number of \\n\\n to skip before starting side-chain verification (warmup period)")
     args = parser.parse_args()
-
-    logger.info(f"Thinking-phase verification: always on")
-    logger.info(f"  Newline threshold: {args.newline_threshold}")
-    logger.info(f"  Warmup: {args.warmup}")
     
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -263,13 +313,10 @@ if __name__ == "__main__":
     total_correct = 0
     total_examples = 0
     total_reasoning_tokens = 0
-    num_attempted = 0  # examples where a \boxed{} answer was produced
-    reasoning_token_counts = []
-    per_example_results = []  # list of dicts for CSV
     
     for idx in indices:
         example = dataset[idx]
-        user_prompt = build_simple_prompt(example)
+        system_prompt, user_prompt = build_meta_prompt_from_example(example)
         if str(example.get("ground_truth", "")).strip() == "Q4":
             target_options = ["A", "B"]
         else:
@@ -278,8 +325,8 @@ if __name__ == "__main__":
         pattern = rf'\b({keys})\.\s*([A-Za-z0-9]+)\b'
         options = dict(re.findall(pattern, user_prompt))
         
-        # Build simple prompt — no system/meta prompt; structure injected by monitor
-        full_prompt = f"<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        # Build full prompt
+        full_prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n"
         
         # Parse maze from prompt
         grid, start_pos, exit_pos = parse_maze_from_prompt(user_prompt)
@@ -289,29 +336,23 @@ if __name__ == "__main__":
             continue
         
         # Detect question type from prompt (auto-detection)
-        question_type = ThinkingPhaseStepVerifierMazeMonitor.detect_question_type(user_prompt)
+        # Falls back to index-based if no turn keywords found
+        question_type = StepVerifierMazeMonitor.detect_question_type(user_prompt)
         
         logger.info(f"\n{'='*60}")
         logger.info(f"Example {idx} ({question_type})")
         logger.info(f"Maze: S={start_pos}, E={exit_pos}, grid={len(grid)}x{len(grid[0]) if grid else 0}")
         logger.info(f"{'='*60}")
         
-        # Always use ThinkingPhaseStepVerifierMazeMonitor:
-        # Phase 1 — verifies during <think> via side-streams
-        # Phase 2a — injects structured step format after </think>
-        # Phase 2b — verifies structured output as model fills it in
-        monitor = ThinkingPhaseStepVerifierMazeMonitor(
-            name="maze_thinking_verifier",
+        # Create the monitor
+        monitor = StepVerifierMazeMonitor(
+            name="maze_step_verifier",
+            answer_start_token="</think>",
             grid=grid,
             start_pos=start_pos,
             exit_pos=exit_pos,
-            llm_server=llm_server,
-            prompt=full_prompt,
-            question_type=question_type,
-            newline_threshold=args.newline_threshold,
             max_corrections=args.max_corrections,
-            answer_start_token="</think>",
-            warmup_newlines=args.warmup,
+            question_type=question_type,
         )
         
         # Run with stream_completion
@@ -319,7 +360,7 @@ if __name__ == "__main__":
             answer = asyncio.run(stream_completion(
                 full_prompt,
                 llm_server=llm_server,
-                monitors=(monitor,),
+                monitors=(),
                 add_delay=False,
                 termination_requires_validation=False,
                 async_execution=True
@@ -330,23 +371,12 @@ if __name__ == "__main__":
             traceback.print_exc()
             continue
         
-        # Save reasoning trace
-        save_prompt(int(idx), answer, reason_dir)
-        logger.info(f"Raw final output:\n{answer}")
-
         # Count generated tokens
         reasoning_tokens = count_tokens(answer, tokenizer)
         total_reasoning_tokens += reasoning_tokens
-        reasoning_token_counts.append(reasoning_tokens)
-        logger.info(f"Generated tokens in this example: {reasoning_tokens}")
         
         gt_sol = str(example.get("ground_truth", "")).strip()
         is_correct, extracted_answer, message = evaluate_maze_answer(answer, options, gt_sol)
-        
-        # "attempted" = model produced a real \boxed{} answer (not "no solution")
-        attempted = (extracted_answer is not None and extracted_answer.strip().lower() != "no solution")
-        if attempted:
-            num_attempted += 1
         
         if extracted_answer:
             logger.info(f"Extracted answer: {extracted_answer}")
@@ -361,30 +391,17 @@ if __name__ == "__main__":
             'idx': int(idx),  # Convert numpy int64 to Python int
             'question_type': question_type,
             'correct': is_correct,
-            'attempted': attempted,
             'sol': extracted_answer,
             'gt': gt_sol,
             'reasoning_tokens': reasoning_tokens,
         }
         results.append(result)
         
-        per_example_results.append({
-            "index": int(idx),
-            "question_type": question_type,
-            "correct": is_correct,
-            "attempted": attempted,
-            "sol": extracted_answer if extracted_answer else "",
-            "gt": gt_sol,
-            "tokens": reasoning_tokens,
-            "message": message,
-        })
-        
-        logger.info(f"Result: sol={extracted_answer}, gt={gt_sol}, correct={is_correct}, attempted={attempted}")
+        logger.info(f"Result: sol={extracted_answer}, gt={gt_sol}, correct={is_correct}")
         logger.info(f"Reasoning tokens: {reasoning_tokens}")
     
     # Compute final metrics
     accuracy = total_correct / total_examples if total_examples > 0 else 0
-    soundness = total_correct / num_attempted if num_attempted > 0 else 0  # correct / attempted
     avg_reasoning_tokens = total_reasoning_tokens / total_examples if total_examples > 0 else 0
     
     logger.info(f"\n{'='*60}")
@@ -392,33 +409,16 @@ if __name__ == "__main__":
     logger.info(f"{'='*60}")
     logger.info(f"Total examples: {total_examples}")
     logger.info(f"Correct: {total_correct}")
-    logger.info(f"Attempted (produced \\boxed answer): {num_attempted}/{total_examples}")
     logger.info(f"Accuracy: {accuracy:.4f} ({total_correct}/{total_examples})")
-    logger.info(f"Soundness: {soundness:.4f} ({total_correct}/{num_attempted})")
     logger.info(f"Total reasoning tokens: {total_reasoning_tokens}")
     logger.info(f"Avg reasoning tokens: {avg_reasoning_tokens:.1f}")
-    
-    print(f"\nFinal Accuracy: {total_correct}/{total_examples} ({accuracy:.2%})")
-    print(f"Soundness: {total_correct}/{num_attempted} ({soundness:.2%})")
-    print(f"Average Reasoning Tokens: {avg_reasoning_tokens:.2f}")
-    print(f"Total Reasoning Tokens: {total_reasoning_tokens}")
-    
-    # Save per-example CSV
-    csv_file = os.path.join(output_dirs["csv_saved"], f"results_{total_examples}examples.csv")
-    with open(csv_file, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=["index", "question_type", "correct", "attempted", "sol", "gt", "tokens", "message"])
-        writer.writeheader()
-        writer.writerows(per_example_results)
-    logger.info(f"Per-example CSV saved to {csv_file}")
     
     # Save summary
     summary = {
         'model': args.model,
         'total_examples': total_examples,
         'correct': total_correct,
-        'attempted': num_attempted,
         'accuracy': accuracy,
-        'soundness': soundness,
         'total_reasoning_tokens': total_reasoning_tokens,
         'avg_reasoning_tokens': avg_reasoning_tokens,
         'max_corrections': args.max_corrections,
@@ -429,33 +429,3 @@ if __name__ == "__main__":
     with open(summary_path, 'w') as f:
         json.dump(summary, f, indent=2)
     logger.info(f"\nSaved summary to {summary_path}")
-    
-    # Save results summary to a text file
-    results_file = os.path.join(output_dirs["base"], f"EAT_{total_examples}examples_results.txt")
-    with open(results_file, 'w') as f:
-        f.write(f"Maze Step Verification Results\n")
-        f.write(f"{'='*50}\n\n")
-        f.write(f"Model: {args.model}\n")
-        f.write(f"Number of Examples: {total_examples}\n")
-        f.write(f"Max Corrections: {args.max_corrections}\n")
-        f.write(f"Newline Threshold: {args.newline_threshold}\n")
-        f.write(f"Warmup: {args.warmup}\n")
-        f.write(f"\n")
-        f.write(f"Results:\n")
-        f.write(f"---------\n")
-        f.write(f"Correct: {total_correct}/{total_examples}\n")
-        f.write(f"Accuracy: {accuracy:.2%}\n")
-        f.write(f"Attempted (produced \\boxed answer): {num_attempted}/{total_examples}\n")
-        f.write(f"Soundness (correct/attempted): {soundness:.2%}\n\n")
-        f.write(f"Token Statistics:\n")
-        f.write(f"---------------------------\n")
-        f.write(f"Total Tokens: {total_reasoning_tokens}\n")
-        f.write(f"Average Tokens: {avg_reasoning_tokens:.2f}\n")
-        if reasoning_token_counts:
-            f.write(f"Median Tokens: {float(np.median(reasoning_token_counts)):.0f}\n")
-            f.write(f"Min Tokens: {min(reasoning_token_counts)}\n")
-            f.write(f"Max Tokens: {max(reasoning_token_counts)}\n")
-            f.write(f"Std Dev: {np.std(reasoning_token_counts):.2f}\n")
-    
-    logger.info(f"Results saved to {results_file}")
-    print(f"Results saved to {results_file}")

@@ -284,6 +284,9 @@ class ThinkingPhaseStepVerifierGame24Monitor(VerifyMonitor):
         # Basic cleanup: remove LaTeX
         expr = expr.replace(r'\times', '*').replace(r'\cdot', '*').replace(r'\div', '/')
         expr = expr.replace(r'\,', '').replace(r'\ ', '')
+        # Replace Unicode math operators (QwQ frequently uses these)
+        expr = expr.replace('\u00d7', '*').replace('\u00f7', '/').replace('\u2212', '-')
+        expr = expr.replace('\u2013', '-').replace('\u2014', '-')  # en-dash, em-dash
         frac_pattern = r"\\frac\{([^{}]+)\}\{([^{}]+)\}"
         while re.search(frac_pattern, expr):
             expr = re.sub(frac_pattern, r"(\1/\2)", expr)
@@ -313,6 +316,9 @@ class ThinkingPhaseStepVerifierGame24Monitor(VerifyMonitor):
         expr = text[start:end - 1].strip()
         expr = expr.replace(r'\times', '*').replace(r'\cdot', '*').replace(r'\div', '/')
         expr = expr.replace(r'\,', '').replace(r'\ ', '')
+        # Replace Unicode math operators (QwQ frequently uses these)
+        expr = expr.replace('\u00d7', '*').replace('\u00f7', '/').replace('\u2212', '-')
+        expr = expr.replace('\u2013', '-').replace('\u2014', '-')  # en-dash, em-dash
         frac_pattern = r"\\frac\{([^{}]+)\}\{([^{}]+)\}"
         while re.search(frac_pattern, expr):
             expr = re.sub(frac_pattern, r"(\1/\2)", expr)
@@ -738,7 +744,7 @@ def _build_maze_format_block(question_type: str) -> str:
     if question_type == "relative_position":
         return (
             "<format>\n"
-            ">>> LOCATE START AND EXIT:\n"
+            ">>> LOCATE START AND EXIT (0-indexed, top-left is (0,0)):\n"
             "    S position: (row, col)\n"
             "    E position: (row, col)\n"
             "\n"
@@ -757,7 +763,7 @@ def _build_maze_format_block(question_type: str) -> str:
 
         return (
             "<format>\n"
-            ">>> LOCATE START AND EXIT:\n"
+            ">>> LOCATE START AND EXIT (0-indexed, top-left is (0,0)):\n"
             "    S position: (row, col)\n"
             "    E position: (row, col)\n"
             "\n"
@@ -789,7 +795,7 @@ def _build_maze_thinking_phase_prompt(question_type: str) -> str:
         "\n\nLet me output the current steps I have traced so far "
         "through the maze in the following format:\n"
         f"{format_block}\n"
-        ">>> LOCATE START AND EXIT:\n"
+        ">>> LOCATE START AND EXIT (0-indexed, top-left is (0,0)):\n"
     )
 
 
@@ -806,7 +812,7 @@ def _build_maze_structured_prompt(question_type: str) -> str:
         "\nLet me trace the step by step solution through the maze "
         "in the following format:\n"
         f"{format_block}\n"
-        ">>> LOCATE START AND EXIT:\n"
+        ">>> LOCATE START AND EXIT (0-indexed, top-left is (0,0)):\n"
     )
 
 
@@ -870,7 +876,7 @@ class ThinkingPhaseStepVerifierMazeMonitor(VerifyMonitor):
         # Build the thinking-phase side-stream prompt (in LLM's own voice)
         self._thinking_phase_prompt = _build_maze_thinking_phase_prompt(question_type)
         # A unique marker to detect whether we already injected it
-        self._structured_marker = ">>> LOCATE START AND EXIT:"
+        self._structured_marker = ">>> LOCATE START AND EXIT (0-indexed, top-left is (0,0)):"
 
         # ---- state ----
         self._think_phase_corrections = 0
@@ -1170,7 +1176,7 @@ class ThinkingPhaseStepVerifierMazeMonitor(VerifyMonitor):
 
         # Strip out the injected <format>...</format> template so we only
         # look at actual model output (which starts after the last
-        # ">>> LOCATE START AND EXIT:\n" line that ends the injected prompt).
+        # ">>> LOCATE START AND EXIT (0-indexed, ...):\n" line that ends the injected prompt).
         last_marker_pos = text_after_think.rfind(self._structured_marker)
         if last_marker_pos >= 0:
             # Model output starts right after the marker line
@@ -1268,7 +1274,7 @@ class ThinkingPhaseStepVerifierMazeMonitor(VerifyMonitor):
 
             # Combine the prompt header with side output for parsing
             full_side_text = (
-                ">>> LOCATE START AND EXIT:\n" + side_output
+                ">>> LOCATE START AND EXIT (0-indexed, top-left is (0,0)):\n" + side_output
             )
 
             # First verify LOCATE section
@@ -1415,7 +1421,7 @@ class ThinkingPhaseStepVerifierMazeMonitor(VerifyMonitor):
         text_after_think = step[think_end_pos:]
 
         # Strip the injected <format>...</format> template — only look at
-        # actual model output starting from the last ">>> LOCATE START AND EXIT:" marker.
+        # actual model output starting from the last ">>> LOCATE START AND EXIT (0-indexed, ...)" marker.
         last_marker_pos = text_after_think.rfind(self._structured_marker)
         if last_marker_pos >= 0:
             text_after_think = text_after_think[last_marker_pos:]
@@ -1801,7 +1807,8 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
                 f"reference={self._counting_question['reference']}, "
                 f"options={self._counting_options}"
             )
-        self._count_feedback_given = False  # only give count feedback once
+        self._count_feedback_given = False
+        self._count_feedback_blocks_count = 0  # tracks cardinal count retry attempts
 
         # ---- direction-question verification ----
         self._direction_question = parse_direction_question(problem_text)
@@ -1833,9 +1840,11 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
         else:
             self._mcq_options = dict(self._counting_options)
 
-        self._direction_feedback_given = False
-        self._object_feedback_given = False
-        self._diag_count_feedback_given = False
+        # Allow multiple retries for final-answer verification
+        self._max_final_answer_retries = 3
+        self._direction_feedback_count = 0
+        self._object_feedback_count = 0
+        self._diag_count_feedback_count = 0
 
     @classmethod
     def from_prompt(
@@ -2076,7 +2085,7 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
 
             # Side-stream: get analysis from the model
             side_output = await self._side_stream_spatialmap(
-                text_with_prompt, max_new_tokens=600
+                text_with_prompt, max_new_tokens=800
             )
 
             if not side_output or len(side_output.strip()) < 20:
@@ -2226,7 +2235,7 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
             if (
                 self._direction_question
                 and num_corrections < self.max_corrections
-                and not self._direction_feedback_given
+                and self._direction_feedback_count < self._max_final_answer_retries
             ):
                 model_dir_text = parse_model_boxed_answer(
                     recent_text, self._mcq_options
@@ -2242,7 +2251,7 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
                         f"model={model_dir_text}, possible={possible}"
                     )
                     if model_dir_text not in possible:
-                        self._direction_feedback_given = True
+                        self._direction_feedback_count += 1
                         # Find which MCQ options are consistent
                         valid_options = [
                             letter for letter, val in self._mcq_options.items()
@@ -2300,7 +2309,7 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
             if (
                 self._object_question
                 and num_corrections < self.max_corrections
-                and not self._object_feedback_given
+                and self._object_feedback_count < self._max_final_answer_retries
             ):
                 model_obj_text = parse_model_boxed_answer(
                     recent_text, self._mcq_options
@@ -2325,7 +2334,7 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
                         f"consistent_options={consistent}"
                     )
                     if model_letter not in consistent:
-                        self._object_feedback_given = True
+                        self._object_feedback_count += 1
                         odir = self._object_question["direction"]
                         oref = self._object_question["reference"]
                         if len(consistent) == 1:
@@ -2402,9 +2411,12 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
                         model_count is not None
                         and model_count != z3_count
                     ):
-                        if not self._count_feedback_given:
-                            self._count_feedback_given = True
+                        self._count_feedback_given = True
+                        count_corrections = self._count_feedback_blocks_count
+                        self._count_feedback_blocks_count = count_corrections + 1
 
+                        if count_corrections == 0:
+                            # First attempt: explain why cardinal = 0
                             if direction in ("north", "south"):
                                 diag_examples = "northeast or northwest"
                             elif direction == "west":
@@ -2433,6 +2445,7 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
                                 f">>> STEP 3: ANSWER\n"
                             )
                         else:
+                            # Subsequent attempts: force the correct answer directly
                             correct_option = None
                             for opt, val in self._counting_options.items():
                                 if val == "0":
@@ -2469,7 +2482,7 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
 
                 else:
                     # --- Diagonal: use Z3 range check ---
-                    if not self._diag_count_feedback_given:
+                    if self._diag_count_feedback_count < self._max_final_answer_retries:
                         model_count = parse_model_count_from_answer(
                             recent_text, self._counting_options
                         )
@@ -2491,7 +2504,7 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
                             )
 
                             if not (min_c <= model_count <= max_c):
-                                self._diag_count_feedback_given = True
+                                self._diag_count_feedback_count += 1
                                 # Find valid MCQ options
                                 valid_opts = []
                                 for opt, val in (

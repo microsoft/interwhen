@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 # ============== MODEL CONFIGURATION ==============
-MAIN_MODEL = "Qwen/Qwen3-30B-A3B-Thinking-2507"
+MAIN_MODEL = "Qwen/QwQ-32B"
 # =================================================
 
 
@@ -90,6 +90,10 @@ def extract_solution(text: str) -> str:
     else:
         answer_section = text
     
+    # Strip injected <format>...</format> template blocks so we don't
+    # accidentally match the placeholder \boxed{LETTER} from the template.
+    answer_section = re.sub(r'<format>.*?</format>', '', answer_section, flags=re.DOTALL)
+    
     matches = re.findall(r'\\boxed\{([^}]*)\}', answer_section)
     if matches:
         return matches[-1].strip()
@@ -107,7 +111,7 @@ def count_tokens(text: str, tokenizer) -> int:
     return len(tokens)
 
 
-def init_llm_server(model_name, max_tokens=32768, port=8000):
+def init_llm_server(model_name, max_tokens=20000, port=8000):
     """Initialize LLM server configuration."""
     url = f"http://localhost:{port}/v1/completions"
     payload = {

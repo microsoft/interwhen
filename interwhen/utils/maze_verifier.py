@@ -142,10 +142,22 @@ def parse_maze_from_prompt(prompt: str) -> Tuple[List[List[str]], Optional[Tuple
     
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith('#') and all(c in '#XSEX ' for c in stripped):
-            in_maze = True
-            current_maze.append(stripped)
-        elif in_maze:
+        # Some dataset entries glue the last maze row to description text,
+        # e.g. "#######, where the symbols ...".  Strip everything from the
+        # first character that isn't a valid maze cell.
+        if stripped.startswith('#'):
+            maze_part = ""
+            for ch in stripped:
+                if ch in '# XSEX':
+                    maze_part += ch
+                else:
+                    break
+            maze_part = maze_part.rstrip()
+            if maze_part and all(c in '#XSEX ' for c in maze_part):
+                in_maze = True
+                current_maze.append(maze_part)
+                continue
+        if in_maze:
             if current_maze:
                 all_mazes.append(current_maze)
             current_maze = []
@@ -420,7 +432,13 @@ def format_locate_feedback(errors: List[str]) -> str:
     feedback = "\n\n[VERIFIER FEEDBACK for LOCATE section:\n"
     for err in errors:
         feedback += f"  ✗ {err}\n"
-    feedback += "Please correct the start/exit positions and continue.]\n\n"
+    feedback += (
+        "IMPORTANT: Coordinates are 0-indexed (row 0, col 0 is the top-left corner). "
+        "Do NOT use 1-indexed coordinates. "
+        "For example, if S is in the first row and first open column, "
+        "that is (0, 1) not (1, 1) or (1, 2).\n"
+        "Please correct the start/exit positions and continue.]\n\n"
+    )
     return feedback
 
 
