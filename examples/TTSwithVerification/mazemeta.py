@@ -51,6 +51,13 @@ def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/MazeResu
     return dirs
 
 
+def save_prompt(idx, prompt_with_answer, reason_dir):
+    """Save reasoning trace to a text file."""
+    filename = os.path.join(reason_dir, f"reason_{idx}.txt")
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(prompt_with_answer)
+
+
 def build_meta_prompt_from_example(example):
     """Build prompt for maze example."""
     system_prompt = """You are a maze-solving AI. Given a maze in ASCII format, analyze it step by step.
@@ -371,6 +378,9 @@ if __name__ == "__main__":
             traceback.print_exc()
             continue
         
+        # Save reasoning trace
+        save_prompt(idx, answer, reason_dir)
+
         # Count generated tokens
         reasoning_tokens = count_tokens(answer, tokenizer)
         total_reasoning_tokens += reasoning_tokens

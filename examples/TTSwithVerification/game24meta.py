@@ -413,14 +413,20 @@ if __name__ == "__main__":
         logger.info(f"---- Example {idx+1} ----")
         logger.info(f"Numbers: {nums}")
 
-        answer = asyncio.run(stream_completion(
-            f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
-            llm_server=llm_server,
-            monitors=monitors,
-            add_delay=False,
-            termination_requires_validation=False,
-            async_execution=True
-        ))
+        try:
+            answer = asyncio.run(stream_completion(
+                f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
+                llm_server=llm_server,
+                monitors=monitors,
+                add_delay=False,
+                termination_requires_validation=False,
+                async_execution=True
+            ))
+        except Exception as e:
+            logger.error(f"Error running example {idx}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
 
         save_prompt(idx, answer, reason_dir)
         logger.info(f"Raw final output:\n{answer}")

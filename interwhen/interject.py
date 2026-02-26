@@ -35,7 +35,11 @@ async def stream_completion(prompt, prev_text = "", llm_server=None, monitors=[]
                         break
                     else:
                         # Obtain the current token (text chunk)
-                        chunk = json.loads(data)["choices"][0]["text"]
+                        try:
+                            chunk = json.loads(data)["choices"][0]["text"]
+                        except (json.JSONDecodeError, KeyError, IndexError) as e:
+                            logger.debug(f"Skipping malformed SSE data: {data!r} ({e})")
+                            continue
                         # If any event is already set, break immediately (we don't want more chunks)
                         if stop_event.is_set():
                             logger.info(f'\n[Early stop already triggered, ignoring chunk: {chunk}]')
