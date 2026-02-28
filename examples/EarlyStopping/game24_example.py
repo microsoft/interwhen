@@ -15,7 +15,7 @@ from interwhen.monitors import SimpleTextReplaceMonitor, KstableAnswerGame24Moni
 
 # ============== MODEL CONFIGURATION ==============
 # Change these model names to scale experiments easily
-MAIN_MODEL = "Qwen/Qwen3-30B-A3B-Thinking-2507"
+MAIN_MODEL = "microsoft/Phi-4-reasoning"
 EARLYSTOP_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 # =================================================
 
@@ -25,7 +25,7 @@ def get_model_short_name(model_name: str) -> str:
     short_name = short_name.replace(" ", "_").replace(":", "-")
     return short_name
 
-def get_output_dirs(main_model: str, base_dir: str = "../../Outputs/Gameof24_results"):
+def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_Kstable2/Gameof24_results"):
     """Create and return output directory paths based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
@@ -42,14 +42,14 @@ def get_output_dirs(main_model: str, base_dir: str = "../../Outputs/Gameof24_res
     
     return dirs
 
-def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs/Gameof24_results") -> str:
+def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_Kstable2/Gameof24_results") -> str:
     """Generate log filename based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     os.makedirs(output_base, exist_ok=True)
     return os.path.join(output_base, f"EAT_{num_examples}examples.log")
 
-def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs/Gameof24_results") -> str:
+def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_Kstable2/Gameof24_results") -> str:
     """Generate token CSV filename based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
@@ -73,10 +73,9 @@ def init_llm_server(modelname, max_tokens=200, port=8000):
     payload = {
         "model": modelname,
         "max_tokens": max_tokens,
-        "top_k": 20,
+        "top_k": 50,
         "top_p": 0.95,
-        "min_p": 0.0,
-        "temperature": 0.6,
+        "temperature": 0.8,
         "stream": True,
         "logprobs": 20,
         "use_beam_search": False,
@@ -148,8 +147,9 @@ def extract_solution(text):
     for latex, op in replacements.items():
         expr = expr.replace(latex, op)
 
-    # 3. Cleanup (remove LaTeX spacing)
+    # 3. Cleanup (remove LaTeX formatting artifacts)
     expr = expr.replace(r"\,", "").replace(r"\ ", "")
+    expr = expr.replace(r"\left", "").replace(r"\right", "")
 
     # 4. Handle implicit multiplication (e.g., "(11+1)(1+1)" -> "(11+1)*(1+1)")
     # Insert * between: )( , )number, number(, )(
@@ -249,7 +249,7 @@ if __name__ == "__main__":
 
     dataset = load_game24_dataset()
 
-    llm_server = init_llm_server(main_model, max_tokens=32768)
+    llm_server = init_llm_server(main_model, max_tokens=20000)
 
     # Load tokenizer for accurate token counting
     logger.info(f"Loading tokenizer for {main_model}...")
@@ -273,23 +273,23 @@ if __name__ == "__main__":
         if args.monitor:
             # Use K-stable answer monitor to detect when equation stabilizes k times
             # monitors = (SimpleTextReplaceMonitor("IsCheck", "</think>", async_execution=False),)
-            # monitors=(KstableAnswerGame24Monitor(
-            #     name="game24_kstable",
-            #     k=3,
-            #     expected_nums=nums,  # Validate equations use exactly these numbers
-            #     answer_start_token="</think>"
-            # ),)
-            monitors = (
-                EATMonitor(
-                    name="EAT_monitor",
-                    model_name=earlystop_model,
-                    alpha=0.2,
-                    delta=0.02,
-                    min_steps=4,
-                    answer_start_token="</think>",
-                    async_execution=True
-                ),
-            )
+            monitors=(KstableAnswerGame24Monitor(
+                name="game24_kstable",
+                k=2,
+                expected_nums=nums,  # Validate equations use exactly these numbers
+                answer_start_token="</think>"
+            ),)
+            # monitors = (
+            #     EATMonitor(
+            #         name="EAT_monitor",
+            #         model_name=earlystop_model,
+            #         alpha=0.2,
+            #         delta=0.02,
+            #         min_steps=4,
+            #         answer_start_token="</think>",
+            #         async_execution=True
+            #     ),
+            # )
         else:
             monitors = ()
 
@@ -297,8 +297,23 @@ if __name__ == "__main__":
         logger.info(f"---- Example {idx+1} ----")
         logger.info(f"Numbers: {nums}")
 
+        system_prompt = (
+            "You are Phi, a language model trained by Microsoft to help users. "
+            "Your role as an assistant involves thoroughly exploring questions through a systematic thinking process "
+            "before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle "
+            "of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop "
+            "well-considered thinking process. Please structure your response into two main sections: Thought and Solution "
+            "using the specified format: <think> {Thought section} </think> {Solution section}. In the Thought section, "
+            "detail your reasoning process in steps. Each step should include detailed considerations such as analysing "
+            "questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, "
+            "refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, "
+            "explorations, and reflections from the Thought section, systematically present the final solution that you "
+            "deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed "
+            "to reach the conclusion. Now, try to solve the following question through the above guidelines."
+        )
+
         answer = asyncio.run(stream_completion(
-            f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
+            f"<|im_start|>system<|im_sep|>\n{system_prompt}<|im_end|>\n<|im_start|>user<|im_sep|>\n{prompt}<|im_end|>\n<|im_start|>assistant<|im_sep|>\n",
             llm_server=llm_server,
             monitors=monitors,
             add_delay=False,

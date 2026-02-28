@@ -14,7 +14,7 @@ from interwhen.monitors import ThinkingPhaseStepVerifierGame24Monitor
 
 # ============== MODEL CONFIGURATION ==============
 # Change these model names to scale experiments easily
-MAIN_MODEL = "Qwen/QwQ-32B"
+MAIN_MODEL = "microsoft/Phi-4-reasoning"
 EARLYSTOP_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 # =================================================
 
@@ -67,15 +67,14 @@ def load_game24_dataset():
     ds = load_dataset("nlile/24-game", split="train")
     return ds
 
-def init_llm_server(modelname, max_tokens=200, port=8000):
+def init_llm_server(modelname, max_tokens=200, port=8001):
     url = f"http://localhost:{port}/v1/completions"
     payload = {
         "model": modelname,
         "max_tokens": max_tokens,
-        "top_k": 20,
+        "top_k": 50,
         "top_p": 0.95,
-        "min_p": 0.0,
-        "temperature": 0.6,
+        "temperature": 0.8,
         "stream": True,
         "logprobs": 20,
         "use_beam_search": False,
@@ -112,10 +111,22 @@ def count_tokens(text: str, tokenizer) -> int:
 
 def extract_solution(text):
     
+    # Only search for \boxed{} AFTER </think> to avoid grabbing unverified
+    # expressions from inside the thinking trace.
+    # If model opened <think> but never closed it (hit token limit), there is
+    # no final answer — return None.
+    if '</think>' in text:
+        search_text = text[text.rfind('</think>'):]
+    elif '<think>' in text:
+        # Model started thinking but never finished — no verified answer
+        return None
+    else:
+        search_text = text
+
     # Use a more robust extraction that handles nested braces in \boxed{}
     # Find \boxed{ and then match braces properly
     boxed_pattern = r"\\boxed\{"
-    matches = list(re.finditer(boxed_pattern, text))
+    matches = list(re.finditer(boxed_pattern, search_text))
     if not matches:
         return None
     
@@ -124,14 +135,18 @@ def extract_solution(text):
     start = last_match.end()  # Position right after \boxed{
     brace_count = 1
     end = start
-    while end < len(text) and brace_count > 0:
-        if text[end] == '{':
+    while end < len(search_text) and brace_count > 0:
+        if search_text[end] == '{':
             brace_count += 1
-        elif text[end] == '}':
+        elif search_text[end] == '}':
             brace_count -= 1
         end += 1
     
-    expr = text[start:end-1].strip()  # -1 to exclude the closing brace
+    expr = search_text[start:end-1].strip()  # -1 to exclude the closing brace
+
+    # Skip empty \boxed{} (e.g., from verifier feedback "Wrap in \boxed{}.")
+    if not expr:
+        return None
 
     # 1. Convert \frac{a}{b} to (a/b)
     frac_pattern = r"\\frac\{([^{}]+)\}\{([^{}]+)\}"
@@ -151,8 +166,12 @@ def extract_solution(text):
     expr = expr.replace('\u00d7', '*').replace('\u00f7', '/').replace('\u2212', '-')
     expr = expr.replace('\u2013', '-').replace('\u2014', '-')  # en-dash, em-dash
 
-    # 3. Cleanup (remove LaTeX spacing)
+    # 3. Cleanup (remove LaTeX formatting artifacts)
     expr = expr.replace(r"\,", "").replace(r"\ ", "")
+    expr = expr.replace(r"\left", "").replace(r"\right", "")
+
+    # 3b. Strip trailing "= <number>" (e.g., "10 - 8/8 * 1 = 24" -> "10 - 8/8 * 1")
+    expr = re.sub(r'\s*=\s*[\d.]+\s*$', '', expr)
 
     # 4. Handle implicit multiplication (e.g., "(11+1)(1+1)" -> "(11+1)*(1+1)")
     # Insert * between: )( , )number, number(, )(
@@ -219,8 +238,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_examples", "-n", type=int, default=1362, help="Number of examples to run")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logs")
     parser.add_argument("--thinking_verify", "-tv", action="store_true", default = True, help="Enable thinking-phase step verification (verify during <think> trace)")
-    parser.add_argument("--newline_threshold", type=int, default=10, help="Number of newlines in thinking before forcing step verification (used with --thinking_verify)")
-    parser.add_argument("--warmup", type=int, default=0, help="Number of \\n\\n to skip before starting side-chain verification (warmup period)")
+    parser.add_argument("--newline_threshold", type=int, default=20, help="Number of newlines in thinking before forcing step verification (used with --thinking_verify)")
+    parser.add_argument("--warmup", type=int, default=4, help="Number of \\n\\n to skip before starting side-chain verification (warmup period)")
     parser.add_argument("--main_model", type=str, default=MAIN_MODEL, help="Main model to use for generation")
     parser.add_argument("--earlystop_model", type=str, default=EARLYSTOP_MODEL, help="Model to use for early stopping")
     args = parser.parse_args()
@@ -262,7 +281,9 @@ if __name__ == "__main__":
 
     num_correct = 0
     num_attempted = 0  # examples where a \boxed{} answer was produced
+    num_excluded = 0   # examples excluded from soundness (no solution or token budget exceeded)
     N = args.num_examples
+    max_token_budget = llm_server["payload"]["max_tokens"]
     total_reasoning_tokens = 0
     reasoning_token_counts = []
     per_example_results = []  # list of dicts for CSV
@@ -275,7 +296,21 @@ if __name__ == "__main__":
         nums = example["numbers"]
 
         prompt = build_prompt(nums)
-        full_prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        system_prompt = (
+            "You are Phi, a language model trained by Microsoft to help users. "
+            "Your role as an assistant involves thoroughly exploring questions through a systematic thinking process "
+            "before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle "
+            "of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop "
+            "well-considered thinking process. Please structure your response into two main sections: Thought and Solution "
+            "using the specified format: <think> {Thought section} </think> {Solution section}. In the Thought section, "
+            "detail your reasoning process in steps. Each step should include detailed considerations such as analysing "
+            "questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, "
+            "refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, "
+            "explorations, and reflections from the Thought section, systematically present the final solution that you "
+            "deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed "
+            "to reach the conclusion. Now, try to solve the following question through the above guidelines."
+        )
+        full_prompt = f"<|im_start|>system<|im_sep|>\n{system_prompt}<|im_end|>\n<|im_start|>user<|im_sep|>\n{prompt}<|im_end|>\n<|im_start|>assistant<|im_sep|>\n"
 
         if args.monitor:
             # ThinkingPhaseStepVerifierGame24Monitor handles both cases:
@@ -288,7 +323,7 @@ if __name__ == "__main__":
                 llm_server=llm_server,
                 prompt=full_prompt,
                 newline_threshold=threshold,
-                max_corrections=5,
+                max_corrections=3,
                 answer_start_token="</think>",
                 warmup_newlines=args.warmup,
             ),)
@@ -321,6 +356,15 @@ if __name__ == "__main__":
         attempted = (expr is not None and expr.strip().lower() != "no solution")
         if attempted:
             num_attempted += 1
+
+        # Determine if this example should be excluded from soundness:
+        #   - answered "no solution" (gave up / max corrections)
+        #   - no expression found (verifier never completed Phase 2)
+        gave_no_solution = (expr is not None and "no solution" in expr.strip().lower())
+        no_expr_found = (expr is None)
+        excluded = gave_no_solution or no_expr_found
+        if excluded:
+            num_excluded += 1
         
         if expr:
             logger.info(f"Extracted expression: {expr}")
@@ -335,6 +379,7 @@ if __name__ == "__main__":
             "expression": expr if expr else "",
             "correct": is_correct,
             "attempted": attempted,
+            "excluded": excluded,
             "tokens": reasoning_tokens,
             "message": message,
         })
@@ -342,17 +387,19 @@ if __name__ == "__main__":
     # Calculate final statistics
     avg_reasoning_tokens = total_reasoning_tokens / N if N > 0 else 0
     accuracy = num_correct / N if N > 0 else 0
-    soundness = num_correct / num_attempted if num_attempted > 0 else 0  # correct / attempted
+    soundness_denom = N - num_excluded
+    soundness = num_correct / soundness_denom if soundness_denom > 0 else 0  # correct / (total - excluded)
     
     print(f"\nFinal Accuracy: {num_correct}/{N} ({accuracy:.2%})")
-    print(f"Soundness: {num_correct}/{num_attempted} ({soundness:.2%})")
+    print(f"Soundness: {num_correct}/{soundness_denom} ({soundness:.2%})")
+    print(f"Excluded from soundness (no solution / token budget exceeded): {num_excluded}")
     print(f"Average Reasoning Tokens: {avg_reasoning_tokens:.2f}")
     print(f"Total Reasoning Tokens: {total_reasoning_tokens}")
 
     # Save per-example CSV
     csv_file = os.path.join(output_dirs["csv_saved"], f"results_{N}examples.csv")
     with open(csv_file, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=["index", "numbers", "expression", "correct", "attempted", "tokens", "message"])
+        writer = csv.DictWriter(f, fieldnames=["index", "numbers", "expression", "correct", "attempted", "excluded", "tokens", "message"])
         writer.writeheader()
         writer.writerows(per_example_results)
     logger.info(f"Per-example CSV saved to {csv_file}")
@@ -374,7 +421,8 @@ if __name__ == "__main__":
         f.write(f"Correct: {num_correct}/{N}\n")
         f.write(f"Accuracy: {accuracy:.2%}\n")
         f.write(f"Attempted (produced \\boxed answer): {num_attempted}/{N}\n")
-        f.write(f"Soundness (correct/attempted): {soundness:.2%}\n\n")
+        f.write(f"Excluded (no solution / token budget exceeded): {num_excluded}/{N}\n")
+        f.write(f"Soundness (correct / (total - excluded)): {num_correct}/{soundness_denom} = {soundness:.2%}\n\n")
         f.write(f"Token Statistics:\n")
         f.write(f"---------------------------\n")
         f.write(f"Total Tokens: {total_reasoning_tokens}\n")

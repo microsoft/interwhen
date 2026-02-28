@@ -12,7 +12,43 @@ from ..utils.spatialmap_verifier import (
     extract_step2_claims, verify_spatialmap_step, format_spatialmap_feedback
 )
 
-    
+
+def _find_complete_boxed(text: str):
+    """Find a complete \\boxed{...} in text, handling nested braces.
+
+    Returns a match-like object with .start() and .end(), or None.
+    """
+    idx = 0
+    while idx < len(text):
+        pos = text.find(r'\boxed{', idx)
+        if pos == -1:
+            return None
+        brace_start = pos + len(r'\boxed{')
+        depth = 1
+        i = brace_start
+        while i < len(text) and depth > 0:
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+            i += 1
+        if depth == 0:
+            content = text[brace_start:i - 1].strip()
+            if content:
+                class _BoxedMatch:
+                    def __init__(self, s, e):
+                        self._start, self._end = s, e
+                    def start(self):
+                        return self._start
+                    def end(self):
+                        return self._end
+                    def group(self, n=0):
+                        return text[self._start:self._end]
+                return _BoxedMatch(pos, i)
+        idx = pos + 1
+    return None
+
+
 class StepVerifierGame24Monitor(VerifyMonitor):
     """
     Step-by-step Game of 24 verifier monitor.
@@ -739,7 +775,7 @@ class StepVerifierMazeMonitor(VerifyMonitor):
         3. LOCATE section is complete and analysis has started (verify LOCATE)
         """
         # Check for boxed answer first (highest priority)
-        boxed_match = re.search(r'\\boxed\{[^}]+\}', text)
+        boxed_match = _find_complete_boxed(text)
         if boxed_match:
             # Found answer, verify it (include full text up to boxed answer)
             end_pos = text_start_in_generated + boxed_match.end()
@@ -989,7 +1025,7 @@ class StepVerifierSpatialMapMonitor(VerifyMonitor):
                     return True, generated_text[:end_pos]
         
         # Check for boxed answer (trigger final verification)
-        boxed_match = re.search(r'\\boxed\{[^}]+\}', text)
+        boxed_match = _find_complete_boxed(text)
         if boxed_match:
             # Verify any remaining claims before final answer
             new_claims = self._extract_new_claims(generated_text)

@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 # ============== MODEL CONFIGURATION ==============
-MAIN_MODEL = "Qwen/QwQ-32B"
+MAIN_MODEL = "microsoft/Phi-4-reasoning"
 # =================================================
 
 
@@ -208,10 +208,9 @@ def init_llm_server(model_name, max_tokens=22000, port=8000):
     payload = {
         "model": model_name,
         "max_tokens": max_tokens,
-        "top_k": 20,
+        "top_k": 50,
         "top_p": 0.95,
-        "min_p": 0.0,
-        "temperature": 0.6,
+        "temperature": 0.8,
         "stream": True,
         "logprobs": 20,
         "use_beam_search": False,
@@ -332,8 +331,8 @@ if __name__ == "__main__":
         pattern = rf'\b({keys})\.\s*([A-Za-z0-9]+)\b'
         options = dict(re.findall(pattern, user_prompt))
         
-        # Build full prompt
-        full_prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        # Build full prompt with Phi-4-reasoning ChatML format
+        full_prompt = f"<|im_start|>system<|im_sep|>\n{system_prompt}<|im_end|>\n<|im_start|>user<|im_sep|>\n{user_prompt}<|im_end|>\n<|im_start|>assistant<|im_sep|>\n<think>\n"
         
         # Parse maze from prompt
         grid, start_pos, exit_pos = parse_maze_from_prompt(user_prompt)

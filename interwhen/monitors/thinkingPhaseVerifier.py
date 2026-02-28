@@ -109,6 +109,54 @@ FINAL_EXPRESSION_PROMPT = (
 )
 
 
+def _find_complete_boxed(text: str) -> Optional[re.Match]:
+    """Find a complete \\boxed{...} in text, handling nested braces.
+
+    Unlike ``re.search(r'\\boxed\{[^}]+\}', text)`` this correctly
+    handles LaTeX like ``\\boxed{12\\frac{1}{2}}`` where the naive
+    ``[^}]+`` pattern would stop at the first ``}``.
+
+    Returns an ``re.Match``-like object with ``.start()`` and ``.end()``
+    spanning the full ``\\boxed{...}`` (including the outer braces),
+    or ``None`` if no complete boxed expression is found.
+    """
+    idx = 0
+    while idx < len(text):
+        pos = text.find(r'\boxed{', idx)
+        if pos == -1:
+            return None
+        # Start counting braces from after '\boxed{'
+        brace_start = pos + len(r'\boxed{')
+        depth = 1
+        i = brace_start
+        while i < len(text) and depth > 0:
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+            i += 1
+        if depth == 0:
+            # Build a simple match-like object
+            match_start = pos
+            match_end = i  # i is right after the closing '}'
+            # Check the content is non-empty
+            content = text[brace_start:i - 1].strip()
+            if content:
+                class _BoxedMatch:
+                    def __init__(self, s, e):
+                        self._start, self._end = s, e
+                    def start(self):
+                        return self._start
+                    def end(self):
+                        return self._end
+                    def group(self, n=0):
+                        return text[self._start:self._end]
+                return _BoxedMatch(match_start, match_end)
+        # Couldn't close braces from this position, try next occurrence
+        idx = pos + 1
+    return None
+
+
 def _extract_numbers_from_expr(expr: str) -> List[float]:
     """Extract all numbers (integers and decimals) from an expression string."""
     numbers = re.findall(r'\d+\.?\d*', expr)
@@ -284,6 +332,7 @@ class ThinkingPhaseStepVerifierGame24Monitor(VerifyMonitor):
         # Basic cleanup: remove LaTeX
         expr = expr.replace(r'\times', '*').replace(r'\cdot', '*').replace(r'\div', '/')
         expr = expr.replace(r'\,', '').replace(r'\ ', '')
+        expr = expr.replace(r'\left', '').replace(r'\right', '')
         # Replace Unicode math operators (QwQ frequently uses these)
         expr = expr.replace('\u00d7', '*').replace('\u00f7', '/').replace('\u2212', '-')
         expr = expr.replace('\u2013', '-').replace('\u2014', '-')  # en-dash, em-dash
@@ -316,6 +365,7 @@ class ThinkingPhaseStepVerifierGame24Monitor(VerifyMonitor):
         expr = text[start:end - 1].strip()
         expr = expr.replace(r'\times', '*').replace(r'\cdot', '*').replace(r'\div', '/')
         expr = expr.replace(r'\,', '').replace(r'\ ', '')
+        expr = expr.replace(r'\left', '').replace(r'\right', '')
         # Replace Unicode math operators (QwQ frequently uses these)
         expr = expr.replace('\u00d7', '*').replace('\u00f7', '/').replace('\u2212', '-')
         expr = expr.replace('\u2013', '-').replace('\u2014', '-')  # en-dash, em-dash
@@ -449,7 +499,7 @@ class ThinkingPhaseStepVerifierGame24Monitor(VerifyMonitor):
             last_feedback_end = match.end()
         text = text_after_think[last_feedback_end:]
 
-        has_boxed = re.search(r'\\boxed\{[^}]+\}', text)
+        has_boxed = _find_complete_boxed(text)
         if has_boxed:
             return True, generated_text
 
@@ -1227,7 +1277,7 @@ class ThinkingPhaseStepVerifierMazeMonitor(VerifyMonitor):
                     return True, generated_text[:end_pos]
 
         # Check for boxed answer (any question type)
-        boxed = re.search(r'\\boxed\{[^}]+\}', text)
+        boxed = _find_complete_boxed(text)
         if boxed:
             end_pos = text_start + boxed.end()
             return True, generated_text[:end_pos]
@@ -2045,7 +2095,7 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
                     return True, generated_text[:end_pos]
 
         # Check for boxed answer (trigger final verification)
-        boxed_match = re.search(r'\\boxed\{[^}]+\}', text)
+        boxed_match = _find_complete_boxed(text)
         if boxed_match:
             new_claims = self._extract_new_claims(text)
             if new_claims:
@@ -2226,7 +2276,7 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
                 return step, feedback
 
         # --- Check for boxed answer ---
-        boxed_match = re.search(r'\\boxed\{[^}]+\}', recent_text)
+        boxed_match = _find_complete_boxed(recent_text)
         if boxed_match:
 
             # ==========================================================

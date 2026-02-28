@@ -39,10 +39,10 @@ Running verifier-guided inference requires only a few lines of code: just specif
 **Set up target LLM server**
 ```bash
 python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen3-30B-A3B-Thinking-2507 \
-  --max-model-len 65536 \
-  --port 8000 \
-  --tensor-parallel-size 8
+  --model microsoft/Phi-4-reasoning \
+  --max-model-len 32768 \
+  --port 8001 \
+  --tensor-parallel-size 2
 ```
 
 **Generate answer enabled with given monitors**

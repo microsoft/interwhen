@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 # ============== MODEL CONFIGURATION ==============
-MAIN_MODEL = "Qwen/QwQ-32B"
+MAIN_MODEL = "microsoft/Phi-4-reasoning"
 # =================================================
 
 
@@ -117,10 +117,9 @@ def init_llm_server(model_name, max_tokens=20000, port=8000):
     payload = {
         "model": model_name,
         "max_tokens": max_tokens,
-        "top_k": 20,
+        "top_k": 50,
         "top_p": 0.95,
-        "min_p": 0.0,
-        "temperature": 0.6,
+        "temperature": 0.8,
         "stream": True,
         "logprobs": 20,
         "use_beam_search": False,
@@ -276,8 +275,22 @@ if __name__ == "__main__":
         # Determine question type
         question_type = get_question_type(idx)
         
-        # Build simple prompt — no system/meta prompt; structure injected by monitor
-        full_prompt = f"<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        # Build prompt with Phi-4-reasoning system prompt
+        phi_system_prompt = (
+            "You are Phi, a language model trained by Microsoft to help users. "
+            "Your role as an assistant involves thoroughly exploring questions through a systematic thinking process "
+            "before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle "
+            "of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop "
+            "well-considered thinking process. Please structure your response into two main sections: Thought and Solution "
+            "using the specified format: <think> {Thought section} </think> {Solution section}. In the Thought section, "
+            "detail your reasoning process in steps. Each step should include detailed considerations such as analysing "
+            "questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, "
+            "refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, "
+            "explorations, and reflections from the Thought section, systematically present the final solution that you "
+            "deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed "
+            "to reach the conclusion. Now, try to solve the following question through the above guidelines."
+        )
+        full_prompt = f"<|im_start|>system<|im_sep|>\n{phi_system_prompt}<|im_end|>\n<|im_start|>user<|im_sep|>\n{user_prompt}<|im_end|>\n<|im_start|>assistant<|im_sep|>\n<think>\n"
         
         logger.info(f"\n{'='*60}")
         logger.info(f"Example {idx} ({question_type})")
