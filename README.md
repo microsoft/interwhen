@@ -102,6 +102,21 @@ We provide examples using three datasets: Maze, Game of 24, and SpatialMap.
 python ./examples/TTSwithVerification/[your_dataset]_stepverifier.py -n 1 # dataset=maze,game24, or spatialmap
 ```
 
+For using TreeofThought
+
+```bash
+python ./examples/TTSwithVerification/tot_baseline.py \
+  --task maze \
+  --num_examples 4 \
+  --ports 8000,8001,8002,8003 \
+  --concurrency 4 \
+  --model Qwen/QwQ-32B \
+  --max_tokens 32768 \
+```
+
+This script loads the same datasets as the verification examples, spins up `TreeOfThoughtSearch` with configurable branching/depth, and round-robins requests across multiple vLLM instances for faster experimentation.
+
+
 ### Monitors for Early stopping
 ```bash
 python ./examples/EarlyStopping/[your_dataset]_example.py -n 1
