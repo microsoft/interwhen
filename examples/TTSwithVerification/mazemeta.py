@@ -162,21 +162,30 @@ Now solve the following maze using the EXACT same format. First locate S and E, 
     return system_prompt, description_trimmed
 
 
-def extract_solution(text: str) -> str:
-    """Extract the boxed answer from the response (after </think>)."""
-    if "</think>" in text:
-        answer_section = text.split("</think>")[-1]
-    else:
-        answer_section = text
-    
-    matches = re.findall(r'\\boxed\{([^}]*)\}', answer_section)
-    if matches:
-        return matches[-1].strip()
-    
-    match = re.search(r'(?:answer|Answer)[:\s]+([A-D])', answer_section)
-    if match:
-        return match.group(1).strip()
-    
+def extract_solution_mcq(text):
+    """Extract MCQ solution from model output."""
+    # Try multiple boxed patterns
+    patterns = [
+        r"\\boxed\{([^}]*)\}",  # \boxed{...}
+        r"boxed\{([^}]*)\}",     # boxed{...} without escape
+        r"\*\*([A-D])\*\*",      # **A** format
+        r"answer[:\s]*([A-D])",  # answer: A format
+        r"(?:^|\n)([A-D])(?:\s|$|\.)",  # Standalone letter
+    ]
+   
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        if matches:
+            expr = matches[-1].strip()
+            choice_match = re.search(r"\b([ABCD])\b", expr, flags=re.IGNORECASE)
+            if choice_match:
+                return choice_match.group(1).upper()
+   
+    # Last resort: look for any standalone A, B, C, or D
+    standalone = re.findall(r"\b([ABCD])\b", text)
+    if standalone:
+        return standalone[-1].upper()
+   
     return None
 
 
@@ -241,7 +250,7 @@ def evaluate_maze_answer(answer, options, ground_truth):
     Returns:
         Tuple of (is_correct, extracted_answer, message)
     """
-    sol = extract_solution(answer)
+    sol = extract_solution_mcq(answer)
     gt_sol = str(ground_truth).strip()
     
     if not sol:

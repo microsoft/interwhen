@@ -15,7 +15,7 @@ from interwhen.monitors import SimpleTextReplaceMonitor, KstableAnswerGame24Moni
 
 # ============== MODEL CONFIGURATION ==============
 # Change these model names to scale experiments easily
-MAIN_MODEL = "microsoft/Phi-4-reasoning"
+MAIN_MODEL = "Qwen/QwQ-32B"
 EARLYSTOP_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 # =================================================
 
@@ -25,7 +25,7 @@ def get_model_short_name(model_name: str) -> str:
     short_name = short_name.replace(" ", "_").replace(":", "-")
     return short_name
 
-def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_Kstable2/Gameof24_results"):
+def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_SANITY/Gameof24_results"):
     """Create and return output directory paths based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
@@ -42,14 +42,14 @@ def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_Kstable2/Gam
     
     return dirs
 
-def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_Kstable2/Gameof24_results") -> str:
+def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_SANITY/Gameof24_results") -> str:
     """Generate log filename based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     os.makedirs(output_base, exist_ok=True)
     return os.path.join(output_base, f"EAT_{num_examples}examples.log")
 
-def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_Kstable2/Gameof24_results") -> str:
+def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_SANITY/Gameof24_results") -> str:
     """Generate token CSV filename based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
@@ -73,9 +73,11 @@ def init_llm_server(modelname, max_tokens=200, port=8000):
     payload = {
         "model": modelname,
         "max_tokens": max_tokens,
-        "top_k": 50,
+        "top_k": 20,
         "top_p": 0.95,
-        "temperature": 0.8,
+        "min_p": 0.0,
+        "do_sample" : True,
+        "temperature": 0.6,
         "stream": True,
         "logprobs": 20,
         "use_beam_search": False,
@@ -112,10 +114,22 @@ def count_tokens(text, tokenizer):
 
 def extract_solution(text):
     
+    # Only search for \boxed{} AFTER </think> to avoid grabbing unverified
+    # expressions from inside the thinking trace.
+    # If model opened <think> but never closed it (hit token limit), there is
+    # no final answer — return None.
+    if '</think>' in text:
+        search_text = text[text.rfind('</think>'):]
+    elif '<think>' in text:
+        # Model started thinking but never finished — no verified answer
+        return None
+    else:
+        search_text = text
+
     # Use a more robust extraction that handles nested braces in \boxed{}
     # Find \boxed{ and then match braces properly
     boxed_pattern = r"\\boxed\{"
-    matches = list(re.finditer(boxed_pattern, text))
+    matches = list(re.finditer(boxed_pattern, search_text))
     if not matches:
         return None
     
@@ -124,14 +138,18 @@ def extract_solution(text):
     start = last_match.end()  # Position right after \boxed{
     brace_count = 1
     end = start
-    while end < len(text) and brace_count > 0:
-        if text[end] == '{':
+    while end < len(search_text) and brace_count > 0:
+        if search_text[end] == '{':
             brace_count += 1
-        elif text[end] == '}':
+        elif search_text[end] == '}':
             brace_count -= 1
         end += 1
     
-    expr = text[start:end-1].strip()  # -1 to exclude the closing brace
+    expr = search_text[start:end-1].strip()  # -1 to exclude the closing brace
+
+    # Skip empty \boxed{} (e.g., from verifier feedback "Wrap in \boxed{}.")
+    if not expr:
+        return None
 
     # 1. Convert \frac{a}{b} to (a/b)
     frac_pattern = r"\\frac\{([^{}]+)\}\{([^{}]+)\}"
@@ -147,9 +165,16 @@ def extract_solution(text):
     for latex, op in replacements.items():
         expr = expr.replace(latex, op)
 
+    # 2b. Replace Unicode math operators (QwQ frequently uses these)
+    expr = expr.replace('\u00d7', '*').replace('\u00f7', '/').replace('\u2212', '-')
+    expr = expr.replace('\u2013', '-').replace('\u2014', '-')  # en-dash, em-dash
+
     # 3. Cleanup (remove LaTeX formatting artifacts)
     expr = expr.replace(r"\,", "").replace(r"\ ", "")
     expr = expr.replace(r"\left", "").replace(r"\right", "")
+
+    # 3b. Strip trailing "= <number>" (e.g., "10 - 8/8 * 1 = 24" -> "10 - 8/8 * 1")
+    expr = re.sub(r'\s*=\s*[\d.]+\s*$', '', expr)
 
     # 4. Handle implicit multiplication (e.g., "(11+1)(1+1)" -> "(11+1)*(1+1)")
     # Insert * between: )( , )number, number(, )(
@@ -183,7 +208,6 @@ def evaluate_expression(expr, expected_nums=None):
     except Exception:
         return False
 
-
 def evaluate_game24_answer(answer, nums):
     """
     Evaluate a Game24 answer and return (is_correct, expr, error_message).
@@ -214,7 +238,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Game of 24 step-by-step solver with monitors")
     parser.add_argument("--thinking", "-t", action="store_true", help="Enable chain-of-thought output")
-    parser.add_argument("--monitor", "-m", default = True, action="store_true", help="Enable step-by-step monitor")
+    parser.add_argument("--monitor", "-m", default = False, action="store_true", help="Enable step-by-step monitor")
     parser.add_argument("--num_examples", "-n", type=int, default=1362, help="Number of examples to run")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logs")
     parser.add_argument("--main_model", type=str, default=MAIN_MODEL, help="Main model to use for generation")
@@ -249,7 +273,7 @@ if __name__ == "__main__":
 
     dataset = load_game24_dataset()
 
-    llm_server = init_llm_server(main_model, max_tokens=20000)
+    llm_server = init_llm_server(main_model, max_tokens=32768, port=8000)
 
     # Load tokenizer for accurate token counting
     logger.info(f"Loading tokenizer for {main_model}...")
@@ -297,23 +321,23 @@ if __name__ == "__main__":
         logger.info(f"---- Example {idx+1} ----")
         logger.info(f"Numbers: {nums}")
 
-        system_prompt = (
-            "You are Phi, a language model trained by Microsoft to help users. "
-            "Your role as an assistant involves thoroughly exploring questions through a systematic thinking process "
-            "before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle "
-            "of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop "
-            "well-considered thinking process. Please structure your response into two main sections: Thought and Solution "
-            "using the specified format: <think> {Thought section} </think> {Solution section}. In the Thought section, "
-            "detail your reasoning process in steps. Each step should include detailed considerations such as analysing "
-            "questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, "
-            "refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, "
-            "explorations, and reflections from the Thought section, systematically present the final solution that you "
-            "deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed "
-            "to reach the conclusion. Now, try to solve the following question through the above guidelines."
-        )
+        # system_prompt = (
+        #     "You are Phi, a language model trained by Microsoft to help users. "
+        #     "Your role as an assistant involves thoroughly exploring questions through a systematic thinking process "
+        #     "before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle "
+        #     "of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop "
+        #     "well-considered thinking process. Please structure your response into two main sections: Thought and Solution "
+        #     "using the specified format: <think> {Thought section} </think> {Solution section}. In the Thought section, "
+        #     "detail your reasoning process in steps. Each step should include detailed considerations such as analysing "
+        #     "questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, "
+        #     "refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, "
+        #     "explorations, and reflections from the Thought section, systematically present the final solution that you "
+        #     "deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed "
+        #     "to reach the conclusion. Now, try to solve the following question through the above guidelines."
+        # )
 
         answer = asyncio.run(stream_completion(
-            f"<|im_start|>system<|im_sep|>\n{system_prompt}<|im_end|>\n<|im_start|>user<|im_sep|>\n{prompt}<|im_end|>\n<|im_start|>assistant<|im_sep|>\n",
+            f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
             llm_server=llm_server,
             monitors=monitors,
             add_delay=False,

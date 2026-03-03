@@ -56,37 +56,42 @@ def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/MazeResu
     return dirs
 
 
-def build_simple_prompt(example):
-    """Build a simple user prompt from the maze example.
+def build_prompt_from_example(example): #(original prompt config)
 
-    No system / meta prompt is used — the structured step format is
-    injected by the monitor after ``</think>``.
-    """
-    description = str(example.get("prompt", ""))
-    # Trim trailing boiler-plate instructions that the dataset appends
-    description_trimmed = description[:-143] if len(description) > 143 else description
-    return description_trimmed
+    pre_prompt = """You are an expert problem solver. Carefully read the following multiple-choice question and think through the solution step-by-step before providing your final answer. Provide your final answer option by enclosing it within \\boxed{A/B/C/D}.:"""
+
+    description = example.get("prompt")
+    description = str(description)
+
+    # remove the unecessary parts of the prompt and then add the prompt that we need.
+    description = remove_last_paragraph(description)
+    return pre_prompt , description
 
 
-def extract_solution(text: str) -> str:
-    """Extract the boxed answer from the response (after </think>)."""
-    if "</think>" in text:
-        answer_section = text.split("</think>")[-1]
-    else:
-        answer_section = text
-    
-    # Strip injected <format>...</format> template blocks so we don't
-    # accidentally match the placeholder \boxed{LETTER} from the template.
-    answer_section = re.sub(r'<format>.*?</format>', '', answer_section, flags=re.DOTALL)
-    
-    matches = re.findall(r'\\boxed\{([^}]*)\}', answer_section)
-    if matches:
-        return matches[-1].strip()
-    
-    match = re.search(r'(?:answer|Answer)[:\s]+([A-D])', answer_section)
-    if match:
-        return match.group(1).strip()
-    
+def extract_solution_mcq(text):
+    """Extract MCQ solution from model output."""
+    # Try multiple boxed patterns
+    patterns = [
+        r"\\boxed\{([^}]*)\}",  # \boxed{...}
+        r"boxed\{([^}]*)\}",     # boxed{...} without escape
+        r"\*\*([A-D])\*\*",      # **A** format
+        r"answer[:\s]*([A-D])",  # answer: A format
+        r"(?:^|\n)([A-D])(?:\s|$|\.)",  # Standalone letter
+    ]
+   
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        if matches:
+            expr = matches[-1].strip()
+            choice_match = re.search(r"\b([ABCD])\b", expr, flags=re.IGNORECASE)
+            if choice_match:
+                return choice_match.group(1).upper()
+   
+    # Last resort: look for any standalone A, B, C, or D
+    standalone = re.findall(r"\b([ABCD])\b", text)
+    if standalone:
+        return standalone[-1].upper()
+   
     return None
 
 
@@ -112,20 +117,21 @@ def count_tokens(text: str, tokenizer) -> int:
 #         return "relative_position"
 
 
-def init_llm_server(model_name, max_tokens=22000, port=8000):
-    """Initialize LLM server configuration."""
+def init_llm_server(modelname, max_tokens=32768, port=8000):
     url = f"http://localhost:{port}/v1/completions"
     payload = {
-        "model": model_name,
+        "model": modelname,
         "max_tokens": max_tokens,
-        "top_k": 50,
+        "top_k": 20,
         "top_p": 0.95,
-        "temperature": 0.8,
+        "min_p": 0.0,
+        "do_sample" : True,
+        "temperature": 0.6,
         "stream": True,
         "logprobs": 20,
         "use_beam_search": False,
         "prompt_cache": True,
-        "seed": 42
+        "seed" : 42
     }
     headers = {"Content-Type": "application/json"}
     return {"url": url, "payload": payload, "headers": headers}
@@ -164,46 +170,23 @@ def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../.
     os.makedirs(output_base, exist_ok=True)
     return os.path.join(output_base, f"EAT_{num_examples}examples.csv")
 
-def evaluate_maze_answer(answer, options, ground_truth):
-    """
-    Evaluate a Maze MCQ answer and return (is_correct, extracted_answer, message).
-    
-    Args:
-        answer: Raw model output
-        options: Dictionary mapping option letters (A/B/C/D) to their values
-        ground_truth: The correct answer value
-        
-    Returns:
-        Tuple of (is_correct, extracted_answer, message)
-    """
-    sol = extract_solution(answer)
+def evaluate_mcq_answer(answer, options, ground_truth):
+    sol = extract_solution_mcq(answer)
     gt_sol = str(ground_truth).strip()
-    
     if not sol:
         return False, None, "No expression found"
-    
     sol = sol.strip()
-    
-    # Case 1: LLM returned option letter (A/B/C/D)
     if sol in options:
         if options[sol] == gt_sol:
             return True, sol, f"Correct: option {sol} -> {options[sol]}"
-        else:
-            return False, sol, f"Incorrect: expected '{gt_sol}', got '{options[sol]}' (option {sol})"
-    
-    # Case 2: LLM returned the actual answer text
-    # First check if sol matches ground truth directly
+        return False, sol, f"Incorrect: expected '{gt_sol}', got '{options[sol]}' (option {sol})"
     if sol.lower() == gt_sol.lower():
         return True, sol, f"Correct: answer text matches ground truth: {sol}"
-    
-    # Check if sol matches any option value
     for opt_letter, opt_value in options.items():
         if sol.lower() == opt_value.lower():
             if opt_value == gt_sol:
                 return True, sol, f"Correct: answer text {sol} (option {opt_letter})"
-            else:
-                return False, sol, f"Incorrect: expected '{gt_sol}', got '{opt_value}' (option {opt_letter})"
-    
+            return False, sol, f"Incorrect: expected '{gt_sol}', got '{opt_value}' (option {opt_letter})"
     return False, sol, f"Solution '{sol}' not found in options or ground truth"
 
 if __name__ == "__main__":
@@ -234,7 +217,7 @@ if __name__ == "__main__":
         logging.getLogger().setLevel(logging.DEBUG)
     
     # Load dataset
-    dataset = load_dataset("microsoft/VISION_LANGUAGE", 'maze', split='val')
+    dataset = load_dataset("microsoft/VISION_LANGUAGE", 'maze_text_only', split='val')
     
     # Setup LLM server
     llm_server = init_llm_server(args.model, port=args.port)
@@ -252,8 +235,8 @@ if __name__ == "__main__":
     if args.indices:
         indices = [int(x.strip()) for x in args.indices.split(",")]
     elif args.num_examples:
-        # Use 4499 as endpoint (4500 is out of bounds since dataset size is 4500)
-        indices = np.linspace(3000, 4499, args.num_examples, dtype=int)
+        # Use 1499 as endpoint (1500 is out of bounds since dataset size is 1500)
+        indices = np.linspace(0, 1499, args.num_examples, dtype=int)
     else:
         indices = range(args.start, args.end)
     
@@ -268,7 +251,7 @@ if __name__ == "__main__":
     
     for idx in indices:
         example = dataset[idx]
-        user_prompt = build_simple_prompt(example)
+        pre_prompt, user_prompt = build_prompt_from_example(example)
         if str(example.get("ground_truth", "")).strip() == "Q4":
             target_options = ["A", "B"]
         else:
@@ -278,21 +261,23 @@ if __name__ == "__main__":
         options = dict(re.findall(pattern, user_prompt))
         
         # Build prompt with Phi-4-reasoning system prompt
-        phi_system_prompt = (
-            "You are Phi, a language model trained by Microsoft to help users. "
-            "Your role as an assistant involves thoroughly exploring questions through a systematic thinking process "
-            "before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle "
-            "of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop "
-            "well-considered thinking process. Please structure your response into two main sections: Thought and Solution "
-            "using the specified format: <think> {Thought section} </think> {Solution section}. In the Thought section, "
-            "detail your reasoning process in steps. Each step should include detailed considerations such as analysing "
-            "questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, "
-            "refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, "
-            "explorations, and reflections from the Thought section, systematically present the final solution that you "
-            "deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed "
-            "to reach the conclusion. Now, try to solve the following question through the above guidelines."
-        )
-        full_prompt = f"<|im_start|>system<|im_sep|>\n{phi_system_prompt}<|im_end|>\n<|im_start|>user<|im_sep|>\n{user_prompt}<|im_end|>\n<|im_start|>assistant<|im_sep|>\n<think>\n"
+        # phi_system_prompt = (
+        #     "You are Phi, a language model trained by Microsoft to help users. "
+        #     "Your role as an assistant involves thoroughly exploring questions through a systematic thinking process "
+        #     "before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle "
+        #     "of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop "
+        #     "well-considered thinking process. Please structure your response into two main sections: Thought and Solution "
+        #     "using the specified format: <think> {Thought section} </think> {Solution section}. In the Thought section, "
+        #     "detail your reasoning process in steps. Each step should include detailed considerations such as analysing "
+        #     "questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, "
+        #     "refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, "
+        #     "explorations, and reflections from the Thought section, systematically present the final solution that you "
+        #     "deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed "
+        #     "to reach the conclusion. Now, try to solve the following question through the above guidelines."
+        # )
+        # full_prompt = f"<|im_start|>system<|im_sep|>\n{phi_system_prompt}<|im_end|>\n<|im_start|>user<|im_sep|>\n{user_prompt}<|im_end|>\n<|im_start|>assistant<|im_sep|>\n<think>\n"
+
+        full_prompt = f"<|im_start|>system\n{pre_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n"
         
         # Parse maze from prompt
         grid, start_pos, exit_pos = parse_maze_from_prompt(user_prompt)
@@ -354,7 +339,7 @@ if __name__ == "__main__":
         logger.info(f"Generated tokens in this example: {reasoning_tokens}")
         
         gt_sol = str(example.get("ground_truth", "")).strip()
-        is_correct, extracted_answer, message = evaluate_maze_answer(answer, options, gt_sol)
+        is_correct, extracted_answer, message = evaluate_mcq_answer(answer, options, gt_sol)
         
         # "attempted" = model produced a real \boxed{} answer (not "no solution")
         attempted = (extracted_answer is not None and extracted_answer.strip().lower() != "no solution")
