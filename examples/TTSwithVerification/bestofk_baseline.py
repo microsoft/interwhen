@@ -16,6 +16,8 @@ from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
+from interwhen.utils.zebralogic_helper import SYSTEM_PROMPT_VANILLA, USER_PROMPT_TEMPLATE, get_zebralogic_dataset, extract_last_json, zebra_correctness
+
 from interwhen import stream_completion
 
 # ============== MODEL CONFIGURATION ==============
@@ -307,6 +309,24 @@ def evaluate_mcq_answer(answer, options, ground_truth):
             return False, sol, f"Incorrect: expected '{gt_sol}', got '{opt_value}' (option {opt_letter})"
     return False, sol, f"Solution '{sol}' not found in options or ground truth"
 
+# --------------------- ZebraLogic helpers ---------------------
+
+def evaluate_zebralogic_answer(answer, example):
+    """Evaluate a zebralogic answer against ground truth using zebra_correctness."""
+    candidate = extract_last_json(answer)
+    if not candidate:
+        return False, None, "No valid JSON solution found"
+    correct, skipped, missing, total = zebra_correctness(example, candidate)
+    is_correct = correct == total
+    msg = f"Correct={correct}/{total}, skipped={skipped}, missing={missing}"
+    return is_correct, candidate, msg
+
+
+def build_zebralogic_prompt(example):
+    system_prompt = SYSTEM_PROMPT_VANILLA
+    user_prompt = USER_PROMPT_TEMPLATE.format(problem_text=example['puzzle_clean'])
+    return system_prompt, user_prompt
+
 
 def build_full_prompt(task, example, nums=None):
     if task == "game24":
@@ -314,6 +334,8 @@ def build_full_prompt(task, example, nums=None):
         return f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
     if task == "maze":
         system_prompt, user_prompt = build_maze_prompt(example)
+    elif task == 'zebralogic':
+        system_prompt, user_prompt = build_zebralogic_prompt(example)
     else:
         system_prompt, user_prompt = build_spatialmap_prompt(example)
     return (
@@ -330,6 +352,8 @@ def load_dataset_for_task(task):
         return load_dataset("microsoft/VISION_LANGUAGE", "maze_text_only", split="val")
     if task == "spatialmap":
         return load_dataset("microsoft/VISION_LANGUAGE", "spatial_map_text_only", split="val")
+    if task == "zebralogic":
+        return get_zebralogic_dataset()
     raise ValueError(f"Unsupported task: {task}")
 
 
@@ -450,6 +474,30 @@ If INCORRECT, explain what went wrong and how to fix it.
 """
 
 
+def build_zebralogic_critic_prompt(task_description, reasoning_output):
+    """Build critic prompt to evaluate ZebraLogic solution and provide reasoning."""
+    return f"""You are an expert logic puzzle verifier. Evaluate the following ZebraLogic solution.
+
+Task:
+{task_description}
+
+Student's reasoning and answer:
+{reasoning_output}
+
+Verify:
+1. Does the solution assign exactly one value per feature per house?
+2. Are all constraints/clues satisfied?
+3. Is the JSON output well-formed and complete?
+
+Respond in the following format:
+VERDICT: CORRECT or INCORRECT
+REASONING: Your detailed explanation
+
+If CORRECT, briefly explain why.
+If INCORRECT, explain what went wrong and suggest corrections.
+"""
+
+
 def build_mcq_critic_prompt(task, task_description, reasoning_output):
     """Build critic prompt to evaluate MCQ solution and provide reasoning."""
     task_name = "Maze" if task == "maze" else "Spatial Reasoning"
@@ -517,6 +565,9 @@ def batch_evaluate_with_critic(outputs_df, task, example, critic_llm_server, tok
                 output_text = row["output"]
                 if task == "game24":
                     critic_prompt = build_game24_critic_prompt(nums, output_text)
+                elif task == "zebralogic":
+                    _, task_desc = build_zebralogic_prompt(example)
+                    critic_prompt = build_zebralogic_critic_prompt(task_desc, output_text)
                 else:
                     if task == "maze":
                         _, task_desc = build_maze_prompt(example)
@@ -648,7 +699,7 @@ def run_k_samples_with_critic(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Best-of-K baseline (standard CoT) for TTSwithVerification datasets")
-    parser.add_argument("--task", type=str, required=True, choices=["game24", "maze", "spatialmap"],
+    parser.add_argument("--task", type=str, required=True, choices=["game24", "maze", "spatialmap", "zebralogic"],
                         help="Task to run")
     parser.add_argument("--k", type=int, default=4, help="Number of samples per example")
     parser.add_argument("--num_examples", "-n", type=int, default=None,
@@ -730,6 +781,12 @@ if __name__ == "__main__":
             prompt = build_full_prompt(args.task, example, nums=nums)
             eval_fn = lambda output: evaluate_game24_answer(output, nums)
             options = None
+        
+        elif args.task == "zebralogic":
+            prompt = build_full_prompt(args.task, example)
+            eval_fn = lambda output, ex=example: evaluate_zebralogic_answer(output, ex)
+            options = None
+        
         else:
             prompt = build_full_prompt(args.task, example)
             gt = str(example.get("ground_truth", "")).strip()
