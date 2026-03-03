@@ -1,10 +1,12 @@
 import argparse
 import asyncio
+from datetime import datetime
 import json
 import logging
 import os
 import re
 import sys
+from multiprocessing.pool import ThreadPool
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -28,6 +30,9 @@ REQUEST_COUNTER = {"main": 0, "critic": 0}  # Track request count for round-robi
 
 
 logger = logging.getLogger(__name__)
+
+# Save the real stderr so tqdm always works even if suppress_output is active
+_real_stderr = sys.stderr
 
 
 @contextmanager
@@ -720,6 +725,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42, help="Base random seed")
     parser.add_argument("--max_tokens", type=int, default=32768, help="Max tokens for generation")
     parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
+    parser.add_argument("--processes", "-p", type=int, default=1, help="Number of examples to process in parallel (default: 1, sequential)")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 
@@ -774,7 +780,8 @@ if __name__ == "__main__":
     total_tokens_all_samples = 0
     results = []
 
-    for idx in tqdm(indices, desc="Processing examples", unit="example"):
+    def process_example(idx):
+        """Process a single example: generate k samples, evaluate, return result dict."""
         example = dataset[int(idx)]
         if args.task == "game24":
             nums = example["numbers"]
@@ -837,17 +844,7 @@ if __name__ == "__main__":
 
         save_outputs(idx, sample_results, best_idx, output_dirs["reasoning"])
 
-        total_examples += 1
-        if any_correct:
-            total_correct += 1
-        total_correct_samples += correct_samples
-        total_samples += len(sample_results)
-        critic_correct_samples += critic_correct_samples_example
-        critic_total_samples += len(sample_results)
-        total_tokens += best_result.tokens
-        total_tokens_all_samples += sum(r.tokens for r in sample_results)
-
-        results.append({
+        return {
             "idx": int(idx),
             "best_idx": best_idx,
             "any_correct": any_correct,
@@ -862,10 +859,31 @@ if __name__ == "__main__":
             "all_critic_correct": [r.critic_correct for r in sample_results],
             "all_critic_feedback": [r.critic_feedback for r in sample_results],
             "options": options,
-        })
+            "_any_correct": any_correct,
+            "_correct_samples": correct_samples,
+            "_critic_correct_samples": critic_correct_samples_example,
+            "_n_samples": len(sample_results),
+            "_best_tokens": best_result.tokens,
+            "_all_tokens_sum": sum(r.tokens for r in sample_results),
+        }
 
-        #logger.info(f"Best sample: {best_idx} | Correct in K: {any_correct}")
-        #logger.info(f"Best message: {best_result.message}")
+    with ThreadPool(processes=args.processes) as pool:
+        for result in tqdm(pool.imap_unordered(process_example, indices), total=len(indices), desc="Processing examples", unit="example", file=_real_stderr):
+            total_examples += 1
+            if result["_any_correct"]:
+                total_correct += 1
+            total_correct_samples += result["_correct_samples"]
+            total_samples += result["_n_samples"]
+            critic_correct_samples += result["_critic_correct_samples"]
+            critic_total_samples += result["_n_samples"]
+            total_tokens += result["_best_tokens"]
+            total_tokens_all_samples += result["_all_tokens_sum"]
+
+            # Remove internal keys before appending
+            for k in list(result.keys()):
+                if k.startswith("_"):
+                    del result[k]
+            results.append(result)
 
     accuracy = total_correct / total_examples if total_examples else 0
     avg_best_tokens = total_tokens / total_examples if total_examples else 0
