@@ -6,10 +6,13 @@ import logging
 import os
 import re
 import sys
+import shutil
+import subprocess
 from multiprocessing.pool import ThreadPool
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -21,13 +24,18 @@ from transformers import AutoTokenizer
 from interwhen.utils.zebralogic_helper import SYSTEM_PROMPT_VANILLA, USER_PROMPT_TEMPLATE, get_zebralogic_dataset, extract_last_json, zebra_correctness
 
 from interwhen import stream_completion
+from verina_utils import *
 
 # ============== MODEL CONFIGURATION ==============
 MAIN_MODEL = "Qwen/QwQ-32B"
 # Multi-process vLLM configuration
 VLLM_PORTS = [8000, 8001, 8002, 8003]  # 4 instances with tensor-parallel-size 2 each
 REQUEST_COUNTER = {"main": 0, "critic": 0}  # Track request count for round-robin load balancing
-
+# Verina paths
+_SCRIPT_DIR = Path(__file__).parent.resolve()
+VERINA_ROOT = (_SCRIPT_DIR / "../../../verina").resolve()
+VERINA_DATASETS_PATH = VERINA_ROOT / "datasets" / "verina"
+LEAN_PLAYGROUND_DIR = VERINA_ROOT / "lean-playground"
 
 logger = logging.getLogger(__name__)
 
@@ -332,6 +340,27 @@ def build_zebralogic_prompt(example):
     user_prompt = USER_PROMPT_TEMPLATE.format(problem_text=example['puzzle_clean'])
     return system_prompt, user_prompt
 
+# verina helpers
+def evaluate_verina_answer(output: str, data: BenchmarkData, task_idx: int) -> Tuple[bool, str, str]:
+    """Evaluate Verina code generation output - wrapper for best-of-k interface"""
+    generated_code = extract_code_from_response(output)
+    
+    if not generated_code.strip():
+        return False, "", "No code extracted from response"
+    
+    compiles, all_tests_pass, compile_output, test_results = evaluate_generated_code(data, generated_code, task_idx)
+    
+    num_tests = len(data.tests) if data.tests else 0
+    num_passed = sum(1 for v in test_results.values() if v == "pass")
+    
+    if compiles and all_tests_pass:
+        return True, generated_code, f"Code compiles and all {num_tests} tests pass"
+    elif compiles:
+        return False, generated_code, f"Compilation succeeded but {num_tests - num_passed}/{num_tests} tests failed"
+    else:
+        error_preview = compile_output[:300] if compile_output else "Unknown error"
+        return False, generated_code, f"Compilation failed: {error_preview}"
+
 
 def build_full_prompt(task, example, nums=None):
     if task == "game24":
@@ -341,6 +370,8 @@ def build_full_prompt(task, example, nums=None):
         system_prompt, user_prompt = build_maze_prompt(example)
     elif task == 'zebralogic':
         system_prompt, user_prompt = build_zebralogic_prompt(example)
+    elif task == "verina":
+        return build_verina_prompt(example)
     else:
         system_prompt, user_prompt = build_spatialmap_prompt(example)
     return (
@@ -359,6 +390,8 @@ def load_dataset_for_task(task):
         return load_dataset("microsoft/VISION_LANGUAGE", "spatial_map_text_only", split="val")
     if task == "zebralogic":
         return get_zebralogic_dataset()
+    if task == "verina":
+        return load_verina_dataset()
     raise ValueError(f"Unsupported task: {task}")
 
 
@@ -524,6 +557,52 @@ If CORRECT, briefly explain why.
 If INCORRECT, explain what went wrong and suggest the correct approach.
 """
 
+def build_verina_critic_prompt(data: BenchmarkData, reasoning_output: str) -> str:
+    """Build critic prompt to evaluate Verina Lean code generation and provide reasoning."""
+    signature = data.signature
+    func_name = signature.get("name", "solution")
+    return_type = signature.get("return_type", "Bool")
+    param_list = render_param_list(signature)
+    
+    precond = data.lean_data.get("precond", "True").strip()
+    postcond = data.lean_data.get("postcond", "").strip()
+    
+    return f"""You are an expert Lean 4 code verifier. Evaluate the following code generation attempt.
+
+## Task Description
+{data.description}
+
+## Function Signature
+```lean4
+def {func_name} {param_list} (h_precond : {func_name}_precond ...) : {return_type}
+```
+
+## Precondition
+```lean4
+{precond}
+```
+
+## Postcondition
+```lean4
+{postcond}
+```
+
+## Student's Reasoning and Generated Code
+{reasoning_output}
+
+Verify:
+1. Is the generated code syntactically valid Lean 4?
+2. Does it match the expected function signature and return type ({return_type})?
+3. Does the logic appear to satisfy the postcondition given the precondition?
+4. Are there any obvious bugs, infinite loops, or incorrect base cases?
+
+Respond in the following format:
+VERDICT: CORRECT or INCORRECT
+REASONING: Your detailed explanation
+
+If CORRECT, briefly explain why
+If INCORRECT, explain what went wrong and suggest how to fix it.
+"""
 
 def batch_evaluate_with_critic(outputs_df, task, example, critic_llm_server, tokenizer, nums=None, quiet=True):
     """Batch evaluate outputs using vLLM API across multiple instances. Outputs_df should have columns: 'output', 'seed_idx'"""
@@ -573,6 +652,8 @@ def batch_evaluate_with_critic(outputs_df, task, example, critic_llm_server, tok
                 elif task == "zebralogic":
                     _, task_desc = build_zebralogic_prompt(example)
                     critic_prompt = build_zebralogic_critic_prompt(task_desc, output_text)
+                elif task == "verina":
+                    critic_prompt = build_verina_critic_prompt(example, output_text)
                 else:
                     if task == "maze":
                         _, task_desc = build_maze_prompt(example)
@@ -704,7 +785,7 @@ def run_k_samples_with_critic(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Best-of-K baseline (standard CoT) for TTSwithVerification datasets")
-    parser.add_argument("--task", type=str, required=True, choices=["game24", "maze", "spatialmap", "zebralogic"],
+    parser.add_argument("--task", type=str, required=True, choices=["game24", "maze", "spatialmap", "zebralogic","verina"],
                         help="Task to run")
     parser.add_argument("--k", type=int, default=4, help="Number of samples per example")
     parser.add_argument("--num_examples", "-n", type=int, default=None,
@@ -792,6 +873,13 @@ if __name__ == "__main__":
         elif args.task == "zebralogic":
             prompt = build_full_prompt(args.task, example)
             eval_fn = lambda output, ex=example: evaluate_zebralogic_answer(output, ex)
+            options = None
+        elif args.task == "verina":
+            # For verina, example is a BenchmarkData object
+            prompt = build_full_prompt(args.task, example)
+            current_idx = int(idx)
+            current_data = example
+            eval_fn = lambda output, data=current_data, task_idx=current_idx: evaluate_verina_answer(output, data, task_idx)
             options = None
         
         else:
