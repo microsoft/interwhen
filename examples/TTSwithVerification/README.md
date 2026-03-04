@@ -156,6 +156,39 @@ The Z3 solver handles diagonal directions (`Northwest`, `Northeast`, `Southwest`
 
 ---
 
+# Best-of-K Baseline
+
+A simple best-of-K baseline that generates K independent reasoning traces per example and selects the best based on:
+1. **Ground-truth matching** (default): Greedy selection of first correct answer among K samples
+2. **Critic model evaluation** (optional): Use a separate critic LLM to evaluate correctness without access to ground truth
+
+This baseline demonstrates that with sufficient sampling, even simple CoT can achieve good performance.
+
+## Usage
+
+```bash
+# Best-of-K with ground-truth evaluation
+python ./examples/TTSwithVerification/bestofk_baseline.py --task game24 -n 10 --k 4
+
+# Best-of-K with critic model evaluation
+python ./examples/TTSwithVerification/bestofk_baseline.py --task game24 -n 10 --k 4 --use_critic --critic_model Qwen/Qwen3-30B-A3B-Thinking-2507 --critic_port 8001
+```
+
+### Parameters
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--task` | Task: `game24`, `maze`, or `spatialmap` | required |
+| `--k` | Number of samples per example | `4` |
+| `--use_critic` | Use critic model for evaluation instead of ground truth | `False` |
+| `--critic_model` | Model to use for critic evaluation | MAIN_MODEL |
+| `--critic_port` | vLLM server port for critic model | `8001` |
+| `--num_examples`, `-n` | Number of examples to run | varies |
+| `--main_model` | Model for generation | `Qwen/Qwen3-30B-A3B-Thinking-2507` |
+| `--port` | vLLM server port for main model | `8000` |
+
+---
+
 ## Example Scripts
 
 Each script runs a full evaluation: loading a dataset, building structured prompts, running inference with step verification, and computing accuracy/token statistics.
@@ -169,6 +202,14 @@ python ./examples/TTSwithVerification/maze_stepverifier.py -n 1
 
 # SpatialMap with step verification
 python ./examples/TTSwithVerification/spatialmap_stepverifier.py -n 1
+
+# Best-of-K baseline (standard CoT, no monitors)
+python ./examples/TTSwithVerification/bestofk_baseline.py --task game24 -n 1 --k 4
+python ./examples/TTSwithVerification/bestofk_baseline.py --task maze -n 1 --k 4
+python ./examples/TTSwithVerification/bestofk_baseline.py --task spatialmap -n 1 --k 4
+
+# Best-of-K with critic model evaluation
+python ./examples/TTSwithVerification/bestofk_baseline.py --task game24 -n 1 --k 4 --use_critic
 ```
 
 ### Common arguments
