@@ -200,6 +200,7 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .*/Outputs_TTS/
 Outputs_TTS/
+Outputs_TTS_temp/
 .cursorignore
 .cursorindexingignore
 
