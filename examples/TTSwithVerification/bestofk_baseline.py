@@ -19,9 +19,9 @@ from transformers import AutoTokenizer
 from interwhen import stream_completion
 
 # ============== MODEL CONFIGURATION ==============
-MAIN_MODEL = "Qwen/QwQ-32B"
+MAIN_MODEL = "Qwen/Qwen3-30B-A3B-Thinking-2507"
 # Multi-process vLLM configuration
-VLLM_PORTS = [8000, 8001, 8002, 8003]  # 4 instances with tensor-parallel-size 2 each
+VLLM_PORTS = [8000, 8001, 8002]  # 3 instances with tensor-parallel-size 2 each
 REQUEST_COUNTER = {"main": 0, "critic": 0}  # Track request count for round-robin load balancing
 
 
@@ -67,7 +67,7 @@ def get_next_port(server_type: str = "main") -> int:
     return port
 
 
-def get_output_dirs(task: str, main_model: str, use_critic: bool, critic_early_stop: bool, base_dir: str = "../../b-pchanda/Outputs_TTS/BestOfKResults"):
+def get_output_dirs(task: str, main_model: str, use_critic: bool, critic_early_stop: bool, base_dir: str = "../../b-pchanda/Outputs_TTS_temp/BestOfKResults"):
     model_short_name = get_model_short_name(main_model)
     critic_status = "on" if use_critic else "off"
     earlystop_status = "on" if critic_early_stop else "off"
@@ -82,26 +82,25 @@ def get_output_dirs(task: str, main_model: str, use_critic: bool, critic_early_s
             os.makedirs(dir_path, exist_ok=True)
     return dirs
 
-
-def init_llm_server(model_name, max_tokens=32768, port=8000, temperature=0.6, seed=42):
+def init_llm_server(modelname, max_tokens=200, port=8000, temperature=0.6, seed=42): #
     url = f"http://localhost:{port}/v1/completions"
     payload = {
-        "model": model_name,
+        "model": modelname,
         "max_tokens": max_tokens,
         "top_k": 20,
         "top_p": 0.95,
         "min_p": 0.0,
-        "do_sample": True,
+        "do_sample" : True,
         "temperature": temperature,
         "stream": False,
         "logprobs": 20,
         "use_beam_search": False,
         "prompt_cache": True,
-        "seed": seed,
+        "seed" : seed
     }
     headers = {"Content-Type": "application/json"}
     return {"url": url, "payload": payload, "headers": headers}
-
+ 
 
 def count_tokens(text: str, tokenizer) -> int:
     """Count tokens in text, with fallback to character count."""
@@ -346,7 +345,9 @@ def resolve_indices(task, dataset_len, args):
             except ValueError:
                 raise ValueError(f"Invalid xrange format: {args.xrange}. Use 'start-end'")
     if args.num_examples:
-        return np.linspace(0, dataset_len - 1, args.num_examples, dtype=int)
+        max_idx = dataset_len - 1
+        upper_bound = min(max_idx, 1362) if task == "game24" else min(max_idx, 1499)
+        return list((np.linspace(0, upper_bound, args.num_examples)).astype(int))
     # Default: use full range
     start = args.start if args.start is not None else 0
     end = args.end if args.end is not None else dataset_len
@@ -650,8 +651,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Best-of-K baseline (standard CoT) for TTSwithVerification datasets")
     parser.add_argument("--task", type=str, required=True, choices=["game24", "maze", "spatialmap"],
                         help="Task to run")
-    parser.add_argument("--k", type=int, default=4, help="Number of samples per example")
-    parser.add_argument("--num_examples", "-n", type=int, default=None,
+    parser.add_argument("--k", type=int, default=1, help="Number of samples per example")
+    parser.add_argument("--num_examples", "-n", type=int, default=100,
                         help="Number of examples to run (overrides start/end)")
     parser.add_argument("--indices", type=str, default=None,
                         help="Comma-separated indices to run")
