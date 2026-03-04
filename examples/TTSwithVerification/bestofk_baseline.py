@@ -1,13 +1,18 @@
 import argparse
 import asyncio
+from datetime import datetime
 import json
 import logging
 import os
 import re
 import sys
+import shutil
+import subprocess
+from multiprocessing.pool import ThreadPool
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -16,16 +21,26 @@ from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
+from interwhen.utils.zebralogic_helper import SYSTEM_PROMPT_VANILLA, USER_PROMPT_TEMPLATE, get_zebralogic_dataset, extract_last_json, zebra_correctness
+
 from interwhen import stream_completion
+from verina_utils import *
 
 # ============== MODEL CONFIGURATION ==============
 MAIN_MODEL = "Qwen/Qwen3-30B-A3B-Thinking-2507"
 # Multi-process vLLM configuration
 VLLM_PORTS = [8000, 8001, 8002]  # 3 instances with tensor-parallel-size 2 each
 REQUEST_COUNTER = {"main": 0, "critic": 0}  # Track request count for round-robin load balancing
-
+# Verina paths
+_SCRIPT_DIR = Path(__file__).parent.resolve()
+VERINA_ROOT = (_SCRIPT_DIR / "../../../verina").resolve()
+VERINA_DATASETS_PATH = VERINA_ROOT / "datasets" / "verina"
+LEAN_PLAYGROUND_DIR = VERINA_ROOT / "lean-playground"
 
 logger = logging.getLogger(__name__)
+
+# Save the real stderr so tqdm always works even if suppress_output is active
+_real_stderr = sys.stderr
 
 
 @contextmanager
@@ -306,6 +321,45 @@ def evaluate_mcq_answer(answer, options, ground_truth):
             return False, sol, f"Incorrect: expected '{gt_sol}', got '{opt_value}' (option {opt_letter})"
     return False, sol, f"Solution '{sol}' not found in options or ground truth"
 
+# --------------------- ZebraLogic helpers ---------------------
+
+def evaluate_zebralogic_answer(answer, example):
+    """Evaluate a zebralogic answer against ground truth using zebra_correctness."""
+    candidate = extract_last_json(answer)
+    if not candidate:
+        return False, None, "No valid JSON solution found"
+    correct, skipped, missing, total = zebra_correctness(example, candidate)
+    is_correct = correct == total
+    msg = f"Correct={correct}/{total}, skipped={skipped}, missing={missing}"
+    return is_correct, candidate, msg
+
+
+def build_zebralogic_prompt(example):
+    system_prompt = SYSTEM_PROMPT_VANILLA
+    user_prompt = USER_PROMPT_TEMPLATE.format(problem_text=example['puzzle_clean'])
+    return system_prompt, user_prompt
+
+# verina helpers
+def evaluate_verina_answer(output: str, data: BenchmarkData, task_idx: int) -> Tuple[bool, str, str]:
+    """Evaluate Verina code generation output - wrapper for best-of-k interface"""
+    generated_code = extract_code_from_response(output)
+    
+    if not generated_code.strip():
+        return False, "", "No code extracted from response"
+    
+    compiles, all_tests_pass, compile_output, test_results = evaluate_generated_code(data, generated_code, task_idx)
+    
+    num_tests = len(data.tests) if data.tests else 0
+    num_passed = sum(1 for v in test_results.values() if v == "pass")
+    
+    if compiles and all_tests_pass:
+        return True, generated_code, f"Code compiles and all {num_tests} tests pass"
+    elif compiles:
+        return False, generated_code, f"Compilation succeeded but {num_tests - num_passed}/{num_tests} tests failed"
+    else:
+        error_preview = compile_output[:300] if compile_output else "Unknown error"
+        return False, generated_code, f"Compilation failed: {error_preview}"
+
 
 def build_full_prompt(task, example, nums=None):
     if task == "game24":
@@ -313,6 +367,10 @@ def build_full_prompt(task, example, nums=None):
         return f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
     if task == "maze":
         system_prompt, user_prompt = build_maze_prompt(example)
+    elif task == 'zebralogic':
+        system_prompt, user_prompt = build_zebralogic_prompt(example)
+    elif task == "verina":
+        return build_verina_prompt(example)
     else:
         system_prompt, user_prompt = build_spatialmap_prompt(example)
     return (
@@ -329,6 +387,10 @@ def load_dataset_for_task(task):
         return load_dataset("microsoft/VISION_LANGUAGE", "maze_text_only", split="val")
     if task == "spatialmap":
         return load_dataset("microsoft/VISION_LANGUAGE", "spatial_map_text_only", split="val")
+    if task == "zebralogic":
+        return get_zebralogic_dataset()
+    if task == "verina":
+        return load_verina_dataset()
     raise ValueError(f"Unsupported task: {task}")
 
 
@@ -451,6 +513,30 @@ If INCORRECT, explain what went wrong and how to fix it.
 """
 
 
+def build_zebralogic_critic_prompt(task_description, reasoning_output):
+    """Build critic prompt to evaluate ZebraLogic solution and provide reasoning."""
+    return f"""You are an expert logic puzzle verifier. Evaluate the following ZebraLogic solution.
+
+Task:
+{task_description}
+
+Student's reasoning and answer:
+{reasoning_output}
+
+Verify:
+1. Does the solution assign exactly one value per feature per house?
+2. Are all constraints/clues satisfied?
+3. Is the JSON output well-formed and complete?
+
+Respond in the following format:
+VERDICT: CORRECT or INCORRECT
+REASONING: Your detailed explanation
+
+If CORRECT, briefly explain why.
+If INCORRECT, explain what went wrong and suggest corrections.
+"""
+
+
 def build_mcq_critic_prompt(task, task_description, reasoning_output):
     """Build critic prompt to evaluate MCQ solution and provide reasoning."""
     task_name = "Maze" if task == "maze" else "Spatial Reasoning"
@@ -472,6 +558,52 @@ If CORRECT, briefly explain why.
 If INCORRECT, explain what went wrong and suggest the correct approach.
 """
 
+def build_verina_critic_prompt(data: BenchmarkData, reasoning_output: str) -> str:
+    """Build critic prompt to evaluate Verina Lean code generation and provide reasoning."""
+    signature = data.signature
+    func_name = signature.get("name", "solution")
+    return_type = signature.get("return_type", "Bool")
+    param_list = render_param_list(signature)
+    
+    precond = data.lean_data.get("precond", "True").strip()
+    postcond = data.lean_data.get("postcond", "").strip()
+    
+    return f"""You are an expert Lean 4 code verifier. Evaluate the following code generation attempt.
+
+## Task Description
+{data.description}
+
+## Function Signature
+```lean4
+def {func_name} {param_list} (h_precond : {func_name}_precond ...) : {return_type}
+```
+
+## Precondition
+```lean4
+{precond}
+```
+
+## Postcondition
+```lean4
+{postcond}
+```
+
+## Student's Reasoning and Generated Code
+{reasoning_output}
+
+Verify:
+1. Is the generated code syntactically valid Lean 4?
+2. Does it match the expected function signature and return type ({return_type})?
+3. Does the logic appear to satisfy the postcondition given the precondition?
+4. Are there any obvious bugs, infinite loops, or incorrect base cases?
+
+Respond in the following format:
+VERDICT: CORRECT or INCORRECT
+REASONING: Your detailed explanation
+
+If CORRECT, briefly explain why
+If INCORRECT, explain what went wrong and suggest how to fix it.
+"""
 
 def batch_evaluate_with_critic(outputs_df, task, example, critic_llm_server, tokenizer, nums=None, quiet=True):
     """Batch evaluate outputs using vLLM API across multiple instances. Outputs_df should have columns: 'output', 'seed_idx'"""
@@ -518,6 +650,11 @@ def batch_evaluate_with_critic(outputs_df, task, example, critic_llm_server, tok
                 output_text = row["output"]
                 if task == "game24":
                     critic_prompt = build_game24_critic_prompt(nums, output_text)
+                elif task == "zebralogic":
+                    _, task_desc = build_zebralogic_prompt(example)
+                    critic_prompt = build_zebralogic_critic_prompt(task_desc, output_text)
+                elif task == "verina":
+                    critic_prompt = build_verina_critic_prompt(example, output_text)
                 else:
                     if task == "maze":
                         _, task_desc = build_maze_prompt(example)
@@ -649,7 +786,7 @@ def run_k_samples_with_critic(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Best-of-K baseline (standard CoT) for TTSwithVerification datasets")
-    parser.add_argument("--task", type=str, required=True, choices=["game24", "maze", "spatialmap"],
+    parser.add_argument("--task", type=str, required=True, choices=["game24", "maze", "spatialmap", "zebralogic","verina"],
                         help="Task to run")
     parser.add_argument("--k", type=int, default=1, help="Number of samples per example")
     parser.add_argument("--num_examples", "-n", type=int, default=100,
@@ -670,6 +807,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42, help="Base random seed")
     parser.add_argument("--max_tokens", type=int, default=32768, help="Max tokens for generation")
     parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
+    parser.add_argument("--processes", "-p", type=int, default=1, help="Number of examples to process in parallel (default: 1, sequential)")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 
@@ -724,13 +862,27 @@ if __name__ == "__main__":
     total_tokens_all_samples = 0
     results = []
 
-    for idx in tqdm(indices, desc="Processing examples", unit="example"):
+    def process_example(idx):
+        """Process a single example: generate k samples, evaluate, return result dict."""
         example = dataset[int(idx)]
         if args.task == "game24":
             nums = example["numbers"]
             prompt = build_full_prompt(args.task, example, nums=nums)
             eval_fn = lambda output: evaluate_game24_answer(output, nums)
             options = None
+        
+        elif args.task == "zebralogic":
+            prompt = build_full_prompt(args.task, example)
+            eval_fn = lambda output, ex=example: evaluate_zebralogic_answer(output, ex)
+            options = None
+        elif args.task == "verina":
+            # For verina, example is a BenchmarkData object
+            prompt = build_full_prompt(args.task, example)
+            current_idx = int(idx)
+            current_data = example
+            eval_fn = lambda output, data=current_data, task_idx=current_idx: evaluate_verina_answer(output, data, task_idx)
+            options = None
+        
         else:
             prompt = build_full_prompt(args.task, example)
             gt = str(example.get("ground_truth", "")).strip()
@@ -781,17 +933,7 @@ if __name__ == "__main__":
 
         save_outputs(idx, sample_results, best_idx, output_dirs["reasoning"])
 
-        total_examples += 1
-        if any_correct:
-            total_correct += 1
-        total_correct_samples += correct_samples
-        total_samples += len(sample_results)
-        critic_correct_samples += critic_correct_samples_example
-        critic_total_samples += len(sample_results)
-        total_tokens += best_result.tokens
-        total_tokens_all_samples += sum(r.tokens for r in sample_results)
-
-        results.append({
+        return {
             "idx": int(idx),
             "best_idx": best_idx,
             "any_correct": any_correct,
@@ -806,10 +948,31 @@ if __name__ == "__main__":
             "all_critic_correct": [r.critic_correct for r in sample_results],
             "all_critic_feedback": [r.critic_feedback for r in sample_results],
             "options": options,
-        })
+            "_any_correct": any_correct,
+            "_correct_samples": correct_samples,
+            "_critic_correct_samples": critic_correct_samples_example,
+            "_n_samples": len(sample_results),
+            "_best_tokens": best_result.tokens,
+            "_all_tokens_sum": sum(r.tokens for r in sample_results),
+        }
 
-        #logger.info(f"Best sample: {best_idx} | Correct in K: {any_correct}")
-        #logger.info(f"Best message: {best_result.message}")
+    with ThreadPool(processes=args.processes) as pool:
+        for result in tqdm(pool.imap_unordered(process_example, indices), total=len(indices), desc="Processing examples", unit="example", file=_real_stderr):
+            total_examples += 1
+            if result["_any_correct"]:
+                total_correct += 1
+            total_correct_samples += result["_correct_samples"]
+            total_samples += result["_n_samples"]
+            critic_correct_samples += result["_critic_correct_samples"]
+            critic_total_samples += result["_n_samples"]
+            total_tokens += result["_best_tokens"]
+            total_tokens_all_samples += result["_all_tokens_sum"]
+
+            # Remove internal keys before appending
+            for k in list(result.keys()):
+                if k.startswith("_"):
+                    del result[k]
+            results.append(result)
 
     accuracy = total_correct / total_examples if total_examples else 0
     avg_best_tokens = total_tokens / total_examples if total_examples else 0
