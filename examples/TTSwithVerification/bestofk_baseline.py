@@ -42,6 +42,19 @@ logger = logging.getLogger(__name__)
 # Save the real stderr so tqdm always works even if suppress_output is active
 _real_stderr = sys.stderr
 
+class NumpyEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles numpy types."""
+    def default(self, obj):
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
 
 @contextmanager
 def suppress_output():
@@ -1006,5 +1019,5 @@ if __name__ == "__main__":
 
     summary_path = os.path.join(output_dirs["base"], "summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
+        json.dump(summary, f, indent=2, cls=NumpyEncoder)
     # logger.info(f"Saved summary to {summary_path}")
