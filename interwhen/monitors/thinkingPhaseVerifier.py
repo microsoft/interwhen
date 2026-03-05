@@ -1703,13 +1703,17 @@ def _build_spatialmap_format_block() -> str:
     return (
         "<format>\n"
         ">>> STEP 1: PARSE RELATIONSHIPS\n"
-        "    - A is to the DIRECTION of B\n"
-        "    [... list all given relationships ...]\n"
+        "    - [Full Name A] is to the [direction] of [Full Name B]\n"
+        "    - [Full Name C] is to the [direction] of [Full Name D]\n"
+        "    [... list ALL given relationships using FULL names exactly as in the question ...]\n"
+        "    (NO abbreviations, NO short forms, NO parenthetical aliases like 'Police Supply Store (PSS)')\n"
         "\n"
         ">>> STEP 2: ANALYZE SPATIAL RELATIONSHIPS\n"
         "    - Looking for: [target relationship / direction / count]\n"
-        "    - [reasoning about the relationships]\n"
-        "    - [use reversibility and transitivity as needed]\n"
+        "    - [Full Name A] is to the [direction] of [Full Name B]\n"
+        "    - [Full Name C] is to the [direction] of [Full Name D]\n"
+        "    [... list each derived relationship as a structured claim using FULL names ...]\n"
+        "    (Each claim MUST be in the form: '[Full Name] is to the [direction] of [Full Name]')\n"
         "\n"
         ">>> STEP 3: ANSWER\n"
         "    - [state conclusion]\n"
@@ -1744,11 +1748,11 @@ def _build_spatialmap_thinking_phase_prompt(
     return (
         "\n\nLet me organize what I have so far. I will list the given "
         "relationships in STEP 1, then in STEP 2 I will state every "
-        "spatial claim I have derived using FULL object names (no "
-        "abbreviations) in exactly this form:\n"
-        "    - [Full Name A] is to the [direction] of [Full Name B]\n"
-        "For direction I will use the full word: northeast, northwest, "
-        "southeast, southwest, north, south, east, or west.\n\n"
+        "spatial claim I have derived.\n"
+        "IMPORTANT: I must use the FULL object names exactly as given in the question "
+        "(no abbreviations, no short forms, no aliases, no partial names, no parenthetical aliases like 'Store (S)').\n"
+        "Every claim must be in the form: '[Full Name] is to the [direction] of [Full Name]'\n"
+        "For direction I will use the full word: northeast, northwest, southeast, southwest, north, south, east, or west.\n\n"
         ">>> STEP 1: PARSE RELATIONSHIPS (given)\n"
         f"{step1_body}\n\n"
         ">>> STEP 2: ANALYZE SPATIAL RELATIONSHIPS (derived)\n"
@@ -1765,7 +1769,10 @@ def _build_spatialmap_structured_prompt() -> str:
     """
     format_block = _build_spatialmap_format_block()
     return (
-        "\nLet me solve this step by step using the structured format:\n"
+        "\nLet me solve this step by step using the structured format.\n"
+        "IMPORTANT: I must use the FULL names of all objects exactly as they appear in the question. "
+        "NO abbreviations, NO short forms, NO parenthetical aliases.\n"
+        "Every relationship must be stated as: '[Full Name] is to the [direction] of [Full Name]'\n\n"
         f"{format_block}\n"
         ">>> STEP 1: PARSE RELATIONSHIPS\n"
     )
@@ -1948,7 +1955,12 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
 
         text_to_check = text[last_feedback_end:]
 
-        all_claims = extract_step2_claims(text_to_check)
+        # Get full entity names from Z3 solver for abbreviation resolution
+        entity_names = list({
+            k[:-2] for k in self.z3_solver.entities if k.endswith('_x')
+        })
+
+        all_claims = extract_step2_claims(text_to_check, entity_names=entity_names)
 
         new_claims = []
         for claim in all_claims:
@@ -2148,7 +2160,12 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
             # Parse directional claims directly from the side-stream output.
             # The prompt pre-fills STEP 1 and ends at ">>> STEP 2:", so the
             # model's output is already STEP 2 content — no header to search for.
-            claims = parse_directional_claims_from_text(side_output)
+            entity_names = list({
+                k[:-2] for k in self.z3_solver.entities if k.endswith('_x')
+            })
+            claims = parse_directional_claims_from_text(
+                side_output, entity_names=entity_names
+            )
 
             logger.info(
                 f"[SpatialMap Phase 1] Parsed {len(claims)} claims from side-stream.\n"
@@ -2465,52 +2482,33 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
                         count_corrections = self._count_feedback_blocks_count
                         self._count_feedback_blocks_count = count_corrections + 1
 
-                        if count_corrections == 0:
-                            # First attempt: explain why cardinal = 0
-                            if direction in ("north", "south"):
-                                diag_examples = "northeast or northwest"
-                            elif direction == "west":
-                                diag_examples = "northwest or southwest"
-                            else:  # east
-                                diag_examples = "northeast or southeast"
+                        # Build direction-specific examples of what does NOT count
+                        if direction in ("north", "south"):
+                            diag_examples = "northeast or northwest"
+                        elif direction == "west":
+                            diag_examples = "northwest or southwest"
+                        else:  # east
+                            diag_examples = "northeast or southeast"
 
-                            feedback = (
-                                f"\n\n[VERIFIER FEEDBACK: Count mismatch!\n"
-                                f"  You answered {model_count} objects "
-                                f"'{direction}' of {reference}, but the "
-                                f"correct count is {z3_count}.\n"
-                                f"  IMPORTANT: '{direction.title()}' means "
-                                f"STRICTLY and EXACTLY {direction} — it "
-                                f"does NOT include diagonal directions "
-                                f"like {diag_examples}.\n"
-                                f"  An object that is Northwest of "
-                                f"{reference} is NOT North of {reference}"
-                                f" and NOT West of {reference}.\n"
-                                f"  Since all given relationships in this "
-                                f"problem are diagonal (NE/NW/SE/SW), no "
-                                f"object can be strictly "
-                                f"'{direction.title()}' of {reference}.\n"
-                                f"  The correct count is {z3_count}. "
-                                f"Please select the option for 0.]\n\n"
-                                f">>> STEP 3: ANSWER\n"
-                            )
-                        else:
-                            # Subsequent attempts: force the correct answer directly
-                            correct_option = None
-                            for opt, val in self._counting_options.items():
-                                if val == "0":
-                                    correct_option = opt
-                                    break
-                            if correct_option:
-                                feedback = (
-                                    f"\nThe correct answer is 0. "
-                                    f"\\boxed{{{correct_option}}}"
-                                )
-                            else:
-                                feedback = (
-                                    f"\nThe correct answer is 0. "
-                                    f"\\boxed{{0}}"
-                                )
+                        feedback = (
+                            f"\n\n[VERIFIER FEEDBACK: Count mismatch!\n"
+                            f"  You answered {model_count} objects "
+                            f"'{direction}' of {reference}, but this "
+                            f"count is incorrect.\n"
+                            f"  IMPORTANT: '{direction.title()}' means "
+                            f"STRICTLY and EXACTLY {direction} — it "
+                            f"does NOT include diagonal directions "
+                            f"like {diag_examples}.\n"
+                            f"  An object that is {diag_examples.split(' or ')[0].title()} of "
+                            f"{reference} is NOT {direction.title()} of "
+                            f"{reference}.\n"
+                            f"  Please go through each object and check "
+                            f"whether it is EXACTLY to the "
+                            f"'{direction}' of {reference}, not to the "
+                            f"{diag_examples}. Then recount carefully "
+                            f"and select the correct option.]\n\n"
+                            f">>> STEP 3: ANSWER\n"
+                        )
 
                         logger.info(
                             f"[SpatialMap Phase 2b] Cardinal count "

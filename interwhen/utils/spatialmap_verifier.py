@@ -316,7 +316,10 @@ def parse_model_count_from_answer(text_after_think: str, options: dict = None) -
         return None
 
 
-def parse_directional_claims_from_text(text: str) -> List[Dict]:
+def parse_directional_claims_from_text(
+    text: str,
+    entity_names: Optional[List[str]] = None,
+) -> List[Dict]:
     """
     Parse directional claims from model output text.
     
@@ -327,8 +330,43 @@ def parse_directional_claims_from_text(text: str) -> List[Dict]:
     - "X is NW of Y" (abbreviated directions)
     - "[X] is to the northwest of [Y]" (bracket-wrapped names)
     
+    If *entity_names* is provided, single-letter or short abbreviations
+    in parsed claims will be resolved to the closest full entity name.
+    Parenthetical aliases like '(L)', '(Mo)' are stripped before parsing.
+    
     Returns list of IR dicts: [{"A": ..., "direction": ..., "B": ...}, ...]
     """
+    # Build abbreviation → full-name map from entity_names.
+    # When multiple entities share the same abbreviation, mark it as
+    # ambiguous (map to None) so we don't silently pick the wrong one.
+    abbrev_to_full: Dict[str, Optional[str]] = {}
+    if entity_names:
+        for name in entity_names:
+            words = re.split(r"[\s']+", name)
+            capitals = [w[0] for w in words if w and w[0].isupper()]
+            candidates: List[str] = []
+            if capitals:
+                candidates.append(capitals[0])                   # e.g. "M"
+                if len(capitals) >= 2:
+                    candidates.append(''.join(capitals[:2]))      # e.g. "MG"
+                    candidates.append(''.join(capitals))          # e.g. "MGM"
+            first_word = words[0] if words else ''
+            if len(first_word) >= 2:
+                candidates.append(first_word[:2])                 # e.g. "Mi"
+            if first_word:
+                candidates.append(first_word)                     # e.g. "Miniature"
+
+            for abbr in candidates:
+                if abbr in abbrev_to_full:
+                    if abbrev_to_full[abbr] != name:
+                        # Ambiguous — mark as None so we skip it
+                        abbrev_to_full[abbr] = None
+                else:
+                    abbrev_to_full[abbr] = name
+
+        # Remove ambiguous entries
+        abbrev_to_full = {k: v for k, v in abbrev_to_full.items() if v is not None}
+
     # Expand abbreviated directions before parsing
     abbrev_map = {
         'NW': 'northwest', 'NE': 'northeast',
@@ -344,10 +382,28 @@ def parse_directional_claims_from_text(text: str) -> List[Dict]:
     # Strip square brackets around entity names: [Foo Bar] → Foo Bar
     expanded_text = re.sub(r'\[([A-Z][A-Za-z\'\s]*?)\]', r'\1', expanded_text)
 
+    # Strip parenthetical aliases like (L), (M), (Mo), (IQC) — but not
+    # coordinate tuples like (0,0) or (a, b)
+    expanded_text = re.sub(r'\s*\([A-Z][A-Za-z]{0,3}\)', '', expanded_text)
+
     claims = []
     
     # Pattern: "X is (to the) DIRECTION of Y"
-    pattern = r"([A-Z][A-Za-z'][A-Za-z'\s]*?)\s+is\s+(?:to\s+the\s+)?(northwest|northeast|southwest|southeast|north|south|east|west)\s+of\s+([A-Z][A-Za-z'][A-Za-z'\s]*?)(?:\.|,|;|:|\s*[→✓✗]|\s*\n|\s*$|\s+(?:and|so|which|therefore|thus|but|since|because|while|whereas|however|hence|then|for|as|meaning|indicating|implying|suggesting|confirming|\())"
+    # Terminators include ⇒ for arrow-style claims.
+    # Entity capture allows single uppercase letters (resolved via abbrev map)
+    # or multi-word names starting with uppercase.
+    entity_pat = r"([A-Z][A-Za-z'][A-Za-z'\s]*?|[A-Z][a-z]?)"
+    pattern = (
+        entity_pat +
+        r"\s+is\s+(?:to\s+the\s+)?"
+        r"(northwest|northeast|southwest|southeast|north|south|east|west)"
+        r"\s+of\s+" +
+        entity_pat +
+        r"(?:\.|,|;|:|\s*[→⇒✓✗]|\s*\n|\s*$"
+        r"|\s+(?:and|so|which|therefore|thus|but|since|because|while|whereas"
+        r"|however|hence|then|for|as|meaning|indicating|implying|suggesting"
+        r"|confirming|\())"
+    )
     
     matches = re.finditer(pattern, expanded_text, re.IGNORECASE)
     
@@ -360,6 +416,13 @@ def parse_directional_claims_from_text(text: str) -> List[Dict]:
         entity_a = re.sub(r'[,\.\!\?]+$', '', entity_a).strip()
         entity_b = re.sub(r'[,\.\!\?]+$', '', entity_b).strip()
         
+        # Resolve abbreviations to full names if entity_names provided
+        if abbrev_to_full:
+            if entity_a in abbrev_to_full:
+                entity_a = abbrev_to_full[entity_a]
+            if entity_b in abbrev_to_full:
+                entity_b = abbrev_to_full[entity_b]
+
         # Skip if entities look like fragments, pronouns, or are too short
         skip_words = {'then', 'if', 'so', 'thus', 'therefore', 'it', 'this', 'that', 
                       'which', 'what', 'where', 'when', 'also', 'not', 'the', 'a', 'an'}
@@ -379,7 +442,10 @@ def parse_directional_claims_from_text(text: str) -> List[Dict]:
     return claims
 
 
-def extract_step2_claims(answer_text: str) -> List[Dict]:
+def extract_step2_claims(
+    answer_text: str,
+    entity_names: Optional[List[str]] = None,
+) -> List[Dict]:
     """
     Extract directional claims specifically from STEP 2 of the answer.
     
@@ -399,7 +465,7 @@ def extract_step2_claims(answer_text: str) -> List[Dict]:
         return []
     
     step2_text = match.group(0)
-    return parse_directional_claims_from_text(step2_text)
+    return parse_directional_claims_from_text(step2_text, entity_names=entity_names)
 
 
 def verify_spatialmap_step(
