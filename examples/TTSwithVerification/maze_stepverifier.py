@@ -28,7 +28,7 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 # ============== MODEL CONFIGURATION ==============
-MAIN_MODEL = "microsoft/Phi-4-reasoning"
+MAIN_MODEL = "Qwen/Qwen3-30B-A3B-Thinking-2507"
 # =================================================
 
 
@@ -39,7 +39,7 @@ def get_model_short_name(model_name: str) -> str:
     return short_name
 
 
-def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/MazeResults"):
+def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS_SANITY/MazeResults"):
     """Create and return output directory paths based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
@@ -55,30 +55,27 @@ def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/MazeResu
     
     return dirs
 
+def remove_last_paragraph(s: str) -> str:
+    return s[:-143]
 
 def build_prompt_from_example(example): #(original prompt config)
 
-    pre_prompt = """You are an expert problem solver. Carefully read the following multiple-choice question and think through the solution step-by-step before providing your final answer. Provide your final answer option by enclosing it within \\boxed{A/B/C/D}.:"""
-
+    pre_prompt = "You are an expert problem solver. Carefully read the following multiple-choice question and think through the solution step-by-step before providing your final answer. Provide your final answer option by enclosing it within \\boxed{A/B/C/D}.:"
     description = example.get("prompt")
     description = str(description)
-
-    # remove the unecessary parts of the prompt and then add the prompt that we need.
     description = remove_last_paragraph(description)
-    return pre_prompt , description
+    return pre_prompt, description
 
 
 def extract_solution_mcq(text):
     """Extract MCQ solution from model output."""
-    # Try multiple boxed patterns
     patterns = [
-        r"\\boxed\{([^}]*)\}",  # \boxed{...}
-        r"boxed\{([^}]*)\}",     # boxed{...} without escape
-        r"\*\*([A-D])\*\*",      # **A** format
-        r"answer[:\s]*([A-D])",  # answer: A format
-        r"(?:^|\n)([A-D])(?:\s|$|\.)",  # Standalone letter
+        r"\\boxed\{([^}]*)\}",
+        r"boxed\{([^}]*)\}",
+        r"\*\*([A-D])\*\*",
+        r"answer[:\s]*([A-D])",
+        r"(?:^|\n)([A-D])(?:\s|$|\.)",
     ]
-   
     for pattern in patterns:
         matches = re.findall(pattern, text, re.IGNORECASE)
         if matches:
@@ -86,12 +83,6 @@ def extract_solution_mcq(text):
             choice_match = re.search(r"\b([ABCD])\b", expr, flags=re.IGNORECASE)
             if choice_match:
                 return choice_match.group(1).upper()
-   
-    # Last resort: look for any standalone A, B, C, or D
-    standalone = re.findall(r"\b([ABCD])\b", text)
-    if standalone:
-        return standalone[-1].upper()
-   
     return None
 
 
@@ -155,7 +146,7 @@ def save_prompt(idx, prompt_with_answer, reason_dir):
     logger.info(f"Saved reasoning trace to {filename}")
 
 
-def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_TTS/MazeResults") -> str:
+def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_TTS_SANITY/MazeResults") -> str:
     """Generate log filename based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
@@ -163,7 +154,7 @@ def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../../
     return os.path.join(output_base, f"EAT_{num_examples}examples.log")
 
 
-def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_TTS/MazeResults") -> str:
+def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_TTS_SANITY/MazeResults") -> str:
     """Generate token CSV filename based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
@@ -195,8 +186,8 @@ if __name__ == "__main__":
                         help="Model name for generation")
     parser.add_argument("--indices", type=str, default=None,
                         help="Comma-separated indices to run (e.g., '3000,3500,4000')")
-    parser.add_argument("--start", type=int, default=3000, help="Start index")
-    parser.add_argument("--end", type=int, default=3010, help="End index")
+    parser.add_argument("--start", type=int, default=0, help="Start index")
+    parser.add_argument("--end", type=int, default=10, help="End index")
     parser.add_argument("--num_examples", "-n", type=int, default=None,
                         help="Number of examples to run (overrides start/end)")
     parser.add_argument("--max_corrections", type=int, default=5,

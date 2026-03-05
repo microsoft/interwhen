@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 # ============== MODEL CONFIGURATION ==============
-MAIN_MODEL = "microsoft/Phi-4-reasoning"
+MAIN_MODEL = "Qwen/Qwen3-30B-A3B-Thinking-2507"
 # =================================================
 
 
@@ -38,7 +38,7 @@ def get_model_short_name(model_name: str) -> str:
     return short_name
 
 
-def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/SpatialMapResults"):
+def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS_SANITY/SpatialMapResults"):
     """Create and return output directory paths based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
@@ -72,36 +72,34 @@ def get_question_type(idx: int) -> str:
 
 
 def build_simple_prompt(example):
-    """Build a simple user prompt from the spatial map example.
-
-    No system / meta prompt is used — the structured step format is
-    injected by the monitor after ``</think>``.
-    """
+    """Build a prompt matching spatialmap_example.py."""
+    pre_prompt = "You are an expert problem solver. Carefully read the following multiple-choice question and think through the solution step-by-step before providing your final answer. Provide your final answer option by enclosing it within \\boxed{A/B/C/D}.:"
     description = str(example.get("prompt", ""))
-    # Trim trailing boiler-plate instructions that the dataset appends
     description_trimmed = description[:-143] if len(description) > 143 else description
-    return description_trimmed
+    return pre_prompt, description_trimmed
 
 
 def extract_solution(text: str) -> str:
     """Extract the boxed answer from the response (after </think>)."""
+    patterns = [
+        r"\\boxed\{([^}]*)\}",
+        r"boxed\{([^}]*)\}",
+        r"\*\*([A-D])\*\*",
+        r"answer[:\s]*([A-D])",
+        r"(?:^|\n)([A-D])(?:\s|$|\.)",
+    ]
     if "</think>" in text:
         answer_section = text.split("</think>")[-1]
     else:
         answer_section = text
-    
-    # Strip injected <format>...</format> template blocks so we don't
-    # accidentally match the placeholder \boxed{LETTER} from the template.
     answer_section = re.sub(r'<format>.*?</format>', '', answer_section, flags=re.DOTALL)
-    
-    matches = re.findall(r'\\boxed\{([^}]*)\}', answer_section)
-    if matches:
-        return matches[-1].strip()
-    
-    match = re.search(r'(?:answer|Answer)[:\s]+([A-D])', answer_section)
-    if match:
-        return match.group(1).strip()
-    
+    for pattern in patterns:
+        matches = re.findall(pattern, answer_section, re.IGNORECASE)
+        if matches:
+            expr = matches[-1].strip()
+            choice_match = re.search(r"\b([ABCD])\b", expr, flags=re.IGNORECASE)
+            if choice_match:
+                return choice_match.group(1).upper()
     return None
 
 
@@ -111,15 +109,17 @@ def count_tokens(text: str, tokenizer) -> int:
     return len(tokens)
 
 
-def init_llm_server(model_name, max_tokens=20000, port=8000):
+def init_llm_server(model_name, max_tokens=32768, port=8000):
     """Initialize LLM server configuration."""
     url = f"http://localhost:{port}/v1/completions"
     payload = {
         "model": model_name,
         "max_tokens": max_tokens,
-        "top_k": 50,
+        "top_k": 20,
         "top_p": 0.95,
-        "temperature": 0.8,
+        "min_p": 0.0,
+        "do_sample": True,
+        "temperature": 0.6,
         "stream": True,
         "logprobs": 20,
         "use_beam_search": False,
@@ -162,32 +162,20 @@ def evaluate_spatialmap_answer(answer, options, ground_truth):
     """
     sol = extract_solution(answer)
     gt_sol = str(ground_truth).strip()
-    
     if not sol:
         return False, None, "No expression found"
-    
     sol = sol.strip()
-    
-    # Case 1: LLM returned option letter (A/B/C/D)
     if sol in options:
         if options[sol] == gt_sol:
             return True, sol, f"Correct: option {sol} -> {options[sol]}"
-        else:
-            return False, sol, f"Incorrect: expected '{gt_sol}', got '{options[sol]}' (option {sol})"
-    
-    # Case 2: LLM returned the actual answer text
-    # First check if sol matches ground truth directly
+        return False, sol, f"Incorrect: expected '{gt_sol}', got '{options[sol]}' (option {sol})"
     if sol.lower() == gt_sol.lower():
         return True, sol, f"Correct: answer text matches ground truth: {sol}"
-    
-    # Check if sol matches any option value
     for opt_letter, opt_value in options.items():
         if sol.lower() == opt_value.lower():
             if opt_value == gt_sol:
                 return True, sol, f"Correct: answer text {sol} (option {opt_letter})"
-            else:
-                return False, sol, f"Incorrect: expected '{gt_sol}', got '{opt_value}' (option {opt_letter})"
-    
+            return False, sol, f"Incorrect: expected '{gt_sol}', got '{opt_value}' (option {opt_letter})"
     return False, sol, f"Solution '{sol}' not found in options or ground truth"
 
 
@@ -261,36 +249,20 @@ if __name__ == "__main__":
     
     for idx in indices:
         example = dataset[idx]
-        user_prompt = build_simple_prompt(example)
+        pre_prompt, description_trimmed = build_simple_prompt(example)
         if str(example.get("ground_truth", "")).strip() == "Q4":
             target_options = ["A", "B"]
         else:
-            target_options = ["A", "B", "C", "D"] 
+            target_options = ["A", "B", "C", "D"]
         keys = "|".join(map(re.escape, target_options))
         pattern = r'\b([A-D])\.\s*(.*?)(?=\s*[A-D]\.|$)'
-        raw = re.findall(pattern, user_prompt, flags=re.DOTALL)
+        raw = re.findall(pattern, description_trimmed, flags=re.DOTALL)
 
         options = {k: v.strip().rstrip(".") for k, v in raw}
-        
-        # Determine question type
+
         question_type = get_question_type(idx)
-        
-        # Build prompt with Phi-4-reasoning system prompt
-        phi_system_prompt = (
-            "You are Phi, a language model trained by Microsoft to help users. "
-            "Your role as an assistant involves thoroughly exploring questions through a systematic thinking process "
-            "before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle "
-            "of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop "
-            "well-considered thinking process. Please structure your response into two main sections: Thought and Solution "
-            "using the specified format: <think> {Thought section} </think> {Solution section}. In the Thought section, "
-            "detail your reasoning process in steps. Each step should include detailed considerations such as analysing "
-            "questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, "
-            "refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, "
-            "explorations, and reflections from the Thought section, systematically present the final solution that you "
-            "deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed "
-            "to reach the conclusion. Now, try to solve the following question through the above guidelines."
-        )
-        full_prompt = f"<|im_start|>system<|im_sep|>\n{phi_system_prompt}<|im_end|>\n<|im_start|>user<|im_sep|>\n{user_prompt}<|im_end|>\n<|im_start|>assistant<|im_sep|>\n<think>\n"
+
+        full_prompt = f"<|im_start|>system\n{pre_prompt}<|im_end|>\n<|im_start|>user\n{description_trimmed}<|im_end|>\n<|im_start|>assistant\n"
         
         logger.info(f"\n{'='*60}")
         logger.info(f"Example {idx} ({question_type})")
@@ -302,7 +274,7 @@ if __name__ == "__main__":
         # Phase 2b — verifies structured output as model fills it in
         monitor = ThinkingPhaseStepVerifierSpatialMapMonitor(
             name="spatialmap_thinking_verifier",
-            problem_text=user_prompt,
+            problem_text=description_trimmed,
             llm_server=llm_server,
             prompt=full_prompt,
             newline_threshold=args.newline_threshold,

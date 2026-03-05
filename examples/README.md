@@ -5,9 +5,8 @@ Running verifier-guided inference requires only a few lines of code: just specif
 ```bash
 python -m vllm.entrypoints.openai.api_server \
   --model Qwen/Qwen3-30B-A3B-Thinking-2507 \
-  --max-model-len 65536 \
   --port 8000 \
-  --tensor-parallel-size 8
+  --tensor-parallel-size 4
 ```
 
 **Generate answer enabled with given monitors**
