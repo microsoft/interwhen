@@ -14,7 +14,7 @@ from interwhen.monitors import ThinkingPhaseStepVerifierGame24Monitor
 
 # ============== MODEL CONFIGURATION ==============
 # Change these model names to scale experiments easily
-MAIN_MODEL = "Qwen/Qwen3-30B-A3B-Thinking-2507"
+MAIN_MODEL = "Qwen/QwQ-32B"
 EARLYSTOP_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 # =================================================
 

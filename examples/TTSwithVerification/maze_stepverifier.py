@@ -28,7 +28,7 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 # ============== MODEL CONFIGURATION ==============
-MAIN_MODEL = "Qwen/Qwen3-30B-A3B-Thinking-2507"
+MAIN_MODEL = "Qwen/QwQ-32B"
 # =================================================
 
 

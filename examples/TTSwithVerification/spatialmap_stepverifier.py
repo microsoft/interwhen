@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 # ============== MODEL CONFIGURATION ==============
-MAIN_MODEL = "Qwen/Qwen3-30B-A3B-Thinking-2507"
+MAIN_MODEL = "Qwen/QwQ-32B"
 # =================================================
 
 
@@ -109,7 +109,7 @@ def count_tokens(text: str, tokenizer) -> int:
     return len(tokens)
 
 
-def init_llm_server(model_name, max_tokens=32768, port=8000):
+def init_llm_server(model_name, max_tokens=20480, port=8000):
     """Initialize LLM server configuration."""
     url = f"http://localhost:{port}/v1/completions"
     payload = {
@@ -194,9 +194,9 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000, help="vLLM server port")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logging")
     parser.add_argument("--newline_threshold", type=int, default=20,
-                        help="Number of \\n\\n in thinking before triggering side verification")
+                        help="Number of \\\\n\\\\n in thinking before triggering side verification")
     parser.add_argument("--warmup", type=int, default=0,
-                        help="Number of \\n\\n to skip before starting side-chain verification (warmup period)")
+                        help="Number of \\\\n\\\\n to skip before starting side-chain verification (warmup period)")
     args = parser.parse_args()
 
     logger.info(f"Thinking-phase verification: always on")

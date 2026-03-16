@@ -1032,16 +1032,7 @@ class ThinkingPhaseStepVerifierMazeMonitor(VerifyMonitor):
             f"  IMPORTANT: In this task, \"{asked_raw}\" means the GENERAL "
             f"COMPASS DIRECTION, NOT immediate adjacency. It asks whether E "
             f"is in the {actual} direction from S, regardless of distance or "
-            f"walls between them.\n"
-            f"  S is at row={sr}, col={sc}. E is at row={er}, col={ec}.\n"
-            f"  Row difference (E-S): {er - sr} ({'same row' if er == sr else ('E is below S' if er > sr else 'E is above S')}).\n"
-            f"  Col difference (E-S): {ec - sc} ({'same col' if ec == sc else ('E is right of S' if ec > sc else 'E is left of S')}).\n"
-            f"  Therefore E is {actual} of S → the correct answer to "
-            f"\"{asked_raw}\" is {expected_yn}.\n"
-            f"  Do NOT consider adjacency or walls. Just compare the row/col "
-            f"coordinates of S and E.\n"
-            f"  Output \\boxed{{{correct_letter}}} for {expected_yn}. "
-            f"This is the verified correct answer — do not argue.]\n\n"
+            f"walls between them.]\n\n"
         )
         return False, feedback
 
@@ -2333,11 +2324,7 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
                                 f"{self._direction_question['entity_a']} "
                                 f"relative to "
                                 f"{self._direction_question['entity_b']} "
-                                f"based on the given constraints.\n"
-                                f"  The only consistent direction is "
-                                f"'{possible[0].title()}'.\n"
-                                f"  Please select option "
-                                f"{valid_options[0]}.]\n\n"
+                                f"based on the given constraints.]\n\n"
                                 f">>> STEP 3: ANSWER\n"
                             )
                         else:
@@ -2352,8 +2339,6 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
                                 f"relative to "
                                 f"{self._direction_question['entity_b']} "
                                 f"based on the given constraints.\n"
-                                f"  The possible directions are: "
-                                f"{possible_str}.\n"
                                 f"  Please reconsider and choose the "
                                 f"correct option.]\n\n"
                                 f">>> STEP 3: ANSWER\n"
@@ -2463,6 +2448,10 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
 
                 if is_cardinal:
                     # --- Cardinal: GT is always 0 ---
+                    # All spatial constraints in this dataset are diagonal
+                    # (NE, NW, SE, SW), so no object can be strictly
+                    # north/south/east/west of another. The answer is
+                    # always 0.
                     model_count = parse_model_count_from_answer(
                         recent_text, self._counting_options
                     )
@@ -2495,18 +2484,19 @@ class ThinkingPhaseStepVerifierSpatialMapMonitor(VerifyMonitor):
                             f"  You answered {model_count} objects "
                             f"'{direction}' of {reference}, but this "
                             f"count is incorrect.\n"
-                            f"  IMPORTANT: '{direction.title()}' means "
-                            f"STRICTLY and EXACTLY {direction} — it "
-                            f"does NOT include diagonal directions "
-                            f"like {diag_examples}.\n"
-                            f"  An object that is {diag_examples.split(' or ')[0].title()} of "
-                            f"{reference} is NOT {direction.title()} of "
+                            f"  IMPORTANT: '{direction}' is a strict "
+                            f"cardinal direction — it means ONLY "
+                            f"exactly {direction}, NOT {diag_examples}."
+                            f"\n"
+                            f"  An object that is {diag_examples.split(' or ')[0]} of "
+                            f"{reference} is NOT {direction} of "
                             f"{reference}.\n"
-                            f"  Please go through each object and check "
-                            f"whether it is EXACTLY to the "
-                            f"'{direction}' of {reference}, not to the "
-                            f"{diag_examples}. Then recount carefully "
-                            f"and select the correct option.]\n\n"
+                            f"  Re-examine each object: is it described "
+                            f"as being strictly '{direction} of' "
+                            f"{reference}, or is the relationship "
+                            f"actually a diagonal direction like "
+                            f"{diag_examples}? Only count objects that "
+                            f"are strictly {direction}.]\n\n"
                             f">>> STEP 3: ANSWER\n"
                         )
 
