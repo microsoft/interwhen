@@ -377,7 +377,7 @@ if __name__ == "__main__":
             answer = asyncio.run(stream_completion(
                 full_prompt,
                 llm_server=llm_server,
-                monitors=(),
+                monitors=(monitor),
                 add_delay=False,
                 termination_requires_validation=False,
                 async_execution=True

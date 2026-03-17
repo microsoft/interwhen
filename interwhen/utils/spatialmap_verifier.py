@@ -13,7 +13,7 @@ Directions use a coordinate system where:
 
 import re
 from typing import Dict, List, Tuple, Optional, Set
-from z3 import Solver, Real, And, sat
+from z3 import Solver, Real, And, Not, sat, unsat
 
 
 class SpatialMapZ3Solver:
@@ -259,9 +259,8 @@ class SpatialMapZ3Solver:
             # Check if this entity MUST be in that direction
             # (i.e. the negation is unsatisfiable)
             self.solver.push()
-            from z3 import Not
             self.solver.add(Not(constraint))
-            must_be = self.solver.check() != sat
+            must_be = self.solver.check() == unsat
             self.solver.pop()
 
             if must_be:
@@ -487,7 +486,7 @@ def verify_spatialmap_step(
     Returns:
         (is_valid, errors)
     """
-    from z3 import Not as Z3Not, sat as z3sat
+    from z3 import Not as Z3Not, unsat as z3unsat
 
     errors = []
     
@@ -508,7 +507,7 @@ def verify_spatialmap_step(
         if compiled is not None:
             z3_solver.solver.push()
             z3_solver.solver.add(Z3Not(compiled))
-            is_entailed = z3_solver.solver.check() != z3sat
+            is_entailed = z3_solver.solver.check() == z3unsat
             z3_solver.solver.pop()
             if is_entailed:
                 z3_solver.apply_ir(claim)
@@ -725,7 +724,7 @@ def get_possible_count_range(
 
     Returns ``None`` if the reference entity cannot be found.
     """
-    from z3 import And as Z3And, Not as Z3Not, sat as z3sat
+    from z3 import And as Z3And, Not as Z3Not, sat as z3sat, unsat as z3unsat
 
     direction = direction.lower().strip()
     if direction in ('north', 'south', 'east', 'west'):
@@ -782,7 +781,7 @@ def get_possible_count_range(
         # Must it be?
         solver.solver.push()
         solver.solver.add(Z3Not(c))
-        must_be = solver.solver.check() != z3sat
+        must_be = solver.solver.check() == z3unsat
         solver.solver.pop()
 
         if must_be:
