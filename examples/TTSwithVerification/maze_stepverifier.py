@@ -15,7 +15,6 @@ import logging
 import os
 import re
 import numpy as np
-from pathlib import Path
 
 from datasets import load_dataset
 from transformers import AutoTokenizer
@@ -31,6 +30,14 @@ logger = logging.getLogger(__name__)
 MAIN_MODEL = "Qwen/QwQ-32B"
 # =================================================
 
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Walk up to find the repo root (contains pyproject.toml), output to its parent
+_dir = _SCRIPT_DIR
+while _dir != os.path.dirname(_dir) and not os.path.isfile(os.path.join(_dir, "pyproject.toml")):
+    _dir = os.path.dirname(_dir)
+_OUTPUT_ROOT = os.path.dirname(_dir)
+
 
 def get_model_short_name(model_name: str) -> str:
     """Extract a short, filesystem-safe name from the model path."""
@@ -39,8 +46,10 @@ def get_model_short_name(model_name: str) -> str:
     return short_name
 
 
-def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS_SANITY/MazeResults"):
+def get_output_dirs(main_model: str, base_dir: str = None):
     """Create and return output directory paths based on model name."""
+    if base_dir is None:
+        base_dir = os.path.join(_OUTPUT_ROOT, "Outputs_TTS", "MazeResults")
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     
@@ -92,22 +101,6 @@ def count_tokens(text: str, tokenizer) -> int:
     return len(tokens)
 
 
-# def get_question_type_from_index(idx: int) -> str:
-#     """Determine question type based on index range.
-    
-#     Dataset structure:
-#     - 3000-3499: right turns
-#     - 3500-3999: total turns
-#     - 4000-4500: relative position
-#     """
-#     if idx < 3500:
-#         return "right_turns"
-#     elif idx < 4000:
-#         return "total_turns"
-#     else:
-#         return "relative_position"
-
-
 def init_llm_server(modelname, max_tokens=32768, port=8000):
     url = f"http://localhost:{port}/v1/completions"
     payload = {
@@ -116,25 +109,16 @@ def init_llm_server(modelname, max_tokens=32768, port=8000):
         "top_k": 20,
         "top_p": 0.95,
         "min_p": 0.0,
-        "do_sample" : True,
+        "do_sample": True,
         "temperature": 0.6,
         "stream": True,
         "logprobs": 20,
         "use_beam_search": False,
         "prompt_cache": True,
-        "seed" : 42
+        "seed": 42
     }
     headers = {"Content-Type": "application/json"}
     return {"url": url, "payload": payload, "headers": headers}
-
-
-def save_output(idx: int, output: str, output_dir: str):
-    """Save output to file."""
-    os.makedirs(output_dir, exist_ok=True)
-    filepath = os.path.join(output_dir, f"output_{idx}.txt")
-    with open(filepath, 'w') as f:
-        f.write(output)
-    logger.info(f"Saved output to {filepath}")
 
 
 def save_prompt(idx, prompt_with_answer, reason_dir):
@@ -146,20 +130,15 @@ def save_prompt(idx, prompt_with_answer, reason_dir):
     logger.info(f"Saved reasoning trace to {filename}")
 
 
-def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_TTS_SANITY/MazeResults") -> str:
+def get_log_filename(main_model: str, num_examples: int, base_dir: str = None) -> str:
     """Generate log filename based on model name."""
+    if base_dir is None:
+        base_dir = os.path.join(_OUTPUT_ROOT, "Outputs_TTS", "MazeResults")
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     os.makedirs(output_base, exist_ok=True)
     return os.path.join(output_base, f"EAT_{num_examples}examples.log")
 
-
-def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_TTS_SANITY/MazeResults") -> str:
-    """Generate token CSV filename based on model name."""
-    model_short_name = get_model_short_name(main_model)
-    output_base = os.path.join(base_dir, model_short_name)
-    os.makedirs(output_base, exist_ok=True)
-    return os.path.join(output_base, f"EAT_{num_examples}examples.csv")
 
 def evaluate_mcq_answer(answer, options, ground_truth):
     sol = extract_solution_mcq(answer)
@@ -195,9 +174,9 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000, help="vLLM server port")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logging")
     parser.add_argument("--newline_threshold", type=int, default=20,
-                        help="Number of \\n\\n in thinking before triggering side verification")
+                        help="Number of \\n in thinking before triggering side verification")
     parser.add_argument("--warmup", type=int, default=0,
-                        help="Number of \\n\\n to skip before starting side-chain verification (warmup period)")
+                        help="Number of \\n to skip before starting side-chain verification (warmup period)")
     args = parser.parse_args()
 
     logger.info(f"Thinking-phase verification: always on")
@@ -251,23 +230,6 @@ if __name__ == "__main__":
         pattern = rf'\b({keys})\.\s*([A-Za-z0-9]+)\b'
         options = dict(re.findall(pattern, user_prompt))
         
-        # Build prompt with Phi-4-reasoning system prompt
-        # phi_system_prompt = (
-        #     "You are Phi, a language model trained by Microsoft to help users. "
-        #     "Your role as an assistant involves thoroughly exploring questions through a systematic thinking process "
-        #     "before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle "
-        #     "of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop "
-        #     "well-considered thinking process. Please structure your response into two main sections: Thought and Solution "
-        #     "using the specified format: <think> {Thought section} </think> {Solution section}. In the Thought section, "
-        #     "detail your reasoning process in steps. Each step should include detailed considerations such as analysing "
-        #     "questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, "
-        #     "refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, "
-        #     "explorations, and reflections from the Thought section, systematically present the final solution that you "
-        #     "deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed "
-        #     "to reach the conclusion. Now, try to solve the following question through the above guidelines."
-        # )
-        # full_prompt = f"<|im_start|>system<|im_sep|>\n{phi_system_prompt}<|im_end|>\n<|im_start|>user<|im_sep|>\n{user_prompt}<|im_end|>\n<|im_start|>assistant<|im_sep|>\n<think>\n"
-
         full_prompt = f"<|im_start|>system\n{pre_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n"
         
         # Parse maze from prompt

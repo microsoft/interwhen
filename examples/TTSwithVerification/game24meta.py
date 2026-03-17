@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import csv
 import json
 import logging
 import os
@@ -8,17 +7,22 @@ import re
 import numpy as np
 
 from datasets import load_dataset
-from openai import OpenAI
 from transformers import AutoTokenizer
 
 from interwhen import stream_completion
-from interwhen.monitors import KstableAnswerGame24Monitor, StepVerifierGame24Monitor
+from interwhen.monitors import StepVerifierGame24Monitor
 
 # ============== MODEL CONFIGURATION ==============
-# Change these model names to scale experiments easily
-MAIN_MODEL = "microsoft/Phi-4-reasoning"
-EARLYSTOP_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+MAIN_MODEL = "Qwen/QwQ-32B"
 # =================================================
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Walk up to find the repo root (contains pyproject.toml), output to its parent
+_dir = _SCRIPT_DIR
+while _dir != os.path.dirname(_dir) and not os.path.isfile(os.path.join(_dir, "pyproject.toml")):
+    _dir = os.path.dirname(_dir)
+_OUTPUT_ROOT = os.path.dirname(_dir)
 
 def get_model_short_name(model_name: str) -> str:
     """Extract a short, filesystem-safe name from the model path."""
@@ -26,8 +30,10 @@ def get_model_short_name(model_name: str) -> str:
     short_name = short_name.replace(" ", "_").replace(":", "-")
     return short_name
 
-def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/Gameof24results/metaPrompt"):
+def get_output_dirs(main_model: str, base_dir: str = None):
     """Create and return output directory paths based on model name."""
+    if base_dir is None:
+        base_dir = os.path.join(_OUTPUT_ROOT, "Outputs_TTS", "Gameof24results", "metaPrompt")
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     
@@ -43,19 +49,14 @@ def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/Gameof24
     
     return dirs
 
-def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_TTS/Gameof24_results/metaPrompt") -> str:
+def get_log_filename(main_model: str, num_examples: int, base_dir: str = None) -> str:
     """Generate log filename based on model name."""
+    if base_dir is None:
+        base_dir = os.path.join(_OUTPUT_ROOT, "Outputs_TTS", "Gameof24results", "metaPrompt")
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     os.makedirs(output_base, exist_ok=True)
     return os.path.join(output_base, f"EAT_{num_examples}examples.log")
-
-def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_TTS/Gameof24_results/metaPrompt") -> str:
-    """Generate token CSV filename based on model name."""
-    model_short_name = get_model_short_name(main_model)
-    output_base = os.path.join(base_dir, model_short_name)
-    os.makedirs(output_base, exist_ok=True)
-    return os.path.join(output_base, f"EAT_{num_examples}examples.csv")
 
 def save_prompt(idx, prompt_with_answer, reason_dir):
     filename = os.path.join(reason_dir, f"reason_{idx}.txt")
@@ -65,23 +66,21 @@ def save_prompt(idx, prompt_with_answer, reason_dir):
 logger = logging.getLogger(__name__)
 
 
-def load_game24_dataset():
-    ds = load_dataset("nlile/24-game", split="train")
-    return ds
-
-def init_llm_server(modelname, max_tokens=200, port=8001):
+def init_llm_server(modelname, max_tokens=32768, port=8000):
     url = f"http://localhost:{port}/v1/completions"
     payload = {
         "model": modelname,
         "max_tokens": max_tokens,
-        "top_k": 50,
+        "top_k": 20,
         "top_p": 0.95,
-        "temperature": 0.8,
+        "min_p": 0.0,
+        "do_sample": True,
+        "temperature": 0.6,
         "stream": True,
         "logprobs": 20,
         "use_beam_search": False,
         "prompt_cache": True,
-        "seed" : 42
+        "seed": 42
     }
     headers = {"Content-Type": "application/json"}
     return {"url": url, "payload": payload, "headers": headers}
@@ -342,22 +341,20 @@ def evaluate_game24_answer(answer, nums):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Game of 24 step-by-step solver with monitors")
-    parser.add_argument("--thinking", "-t", action="store_true", help="Enable chain-of-thought output")
-    parser.add_argument("--monitor", "-m", default = False, action="store_true", help="Enable step-by-step monitor")
+    parser.add_argument("--monitor", "-m", action="store_true", help="Enable step-by-step monitor")
     parser.add_argument("--num_examples", "-n", type=int, default=1, help="Number of examples to run")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logs")
-    parser.add_argument("--main_model", type=str, default=MAIN_MODEL, help="Main model to use for generation")
-    parser.add_argument("--earlystop_model", type=str, default=EARLYSTOP_MODEL, help="Model to use for early stopping")
+    parser.add_argument("--model", type=str, default=MAIN_MODEL, help="Model to use for generation")
+    parser.add_argument("--port", type=int, default=8000, help="vLLM server port")
+    parser.add_argument("--max_corrections", type=int, default=5,
+                        help="Maximum number of correction attempts per example")
     args = parser.parse_args()
 
-    # Use models from args (allows command-line override)
-    main_model = args.main_model
-    earlystop_model = args.earlystop_model
+    main_model = args.model
 
     # Setup output directories based on model name
     output_dirs = get_output_dirs(main_model)
     logfile = get_log_filename(main_model, args.num_examples)
-    token_filename = get_token_filename(main_model, args.num_examples)
     reason_dir = output_dirs["reasoning"]
 
     log_level = logging.DEBUG if args.debug else logging.INFO
@@ -373,12 +370,11 @@ if __name__ == "__main__":
     )
 
     logger.info(f"Main model: {main_model}")
-    logger.info(f"Early stop model: {earlystop_model}")
     logger.info(f"Output directory: {output_dirs['base']}")
 
-    dataset = load_game24_dataset()
+    dataset = load_dataset("nlile/24-game", split="train")
 
-    llm_server = init_llm_server(main_model, max_tokens=22000)
+    llm_server = init_llm_server(main_model, port=args.port)
 
     # Load tokenizer for accurate token counting
     logger.info(f"Loading tokenizer for {main_model}...")
@@ -400,37 +396,23 @@ if __name__ == "__main__":
         prompt = build_meta_prompt_from_example(nums)
 
         if args.monitor:
-            # Use StepVerifierGame24Monitor to detect when equation stabilizes k times
-            monitors=(StepVerifierGame24Monitor(
-                name="game24_kstable",
-                answer_start_token = "</think>",
-                original_numbers=nums,  # Validate equations use exactly these numbers
+            monitors = (StepVerifierGame24Monitor(
+                name="game24_verifier",
+                answer_start_token="</think>",
+                original_numbers=nums,
+                max_corrections=args.max_corrections,
             ),)
         else:
             monitors = ()
 
-        logger.info(f"---- length of monitors {len(monitors)} ----")
         logger.info(f"---- Example {idx+1} ----")
         logger.info(f"Numbers: {nums}")
 
-        system_prompt = (
-            "You are Phi, a language model trained by Microsoft to help users. "
-            "Your role as an assistant involves thoroughly exploring questions through a systematic thinking process "
-            "before providing the final precise and accurate solutions. This requires engaging in a comprehensive cycle "
-            "of analysis, summarizing, exploration, reassessment, reflection, backtracing, and iteration to develop "
-            "well-considered thinking process. Please structure your response into two main sections: Thought and Solution "
-            "using the specified format: <think> {Thought section} </think> {Solution section}. In the Thought section, "
-            "detail your reasoning process in steps. Each step should include detailed considerations such as analysing "
-            "questions, summarizing relevant findings, brainstorming new ideas, verifying the accuracy of the current steps, "
-            "refining any errors, and revisiting previous steps. In the Solution section, based on various attempts, "
-            "explorations, and reflections from the Thought section, systematically present the final solution that you "
-            "deem correct. The Solution section should be logical, accurate, and concise and detail necessary steps needed "
-            "to reach the conclusion. Now, try to solve the following question through the above guidelines."
-        )
+        full_prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
 
         try:
             answer = asyncio.run(stream_completion(
-                f"<|im_start|>system<|im_sep|>\n{system_prompt}<|im_end|>\n<|im_start|>user<|im_sep|>\n{prompt}<|im_end|>\n<|im_start|>assistant<|im_sep|>\n",
+                full_prompt,
                 llm_server=llm_server,
                 monitors=monitors,
                 add_delay=False,

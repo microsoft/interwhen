@@ -1,6 +1,14 @@
+"""
+Game of 24 experiment with thinking-phase step verification.
+
+Uses ThinkingPhaseStepVerifierGame24Monitor which:
+  - Verifies the model's intermediate expressions during <think> via side-streams
+  - Injects expression extraction after </think>
+  - Verifies the final \\boxed{} expression for correctness
+"""
+
 import argparse
 import asyncio
-import csv
 import logging
 import os
 import re
@@ -13,10 +21,16 @@ from interwhen import stream_completion
 from interwhen.monitors import ThinkingPhaseStepVerifierGame24Monitor
 
 # ============== MODEL CONFIGURATION ==============
-# Change these model names to scale experiments easily
 MAIN_MODEL = "Qwen/QwQ-32B"
-EARLYSTOP_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 # =================================================
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Walk up to find the repo root (contains pyproject.toml), output to its parent
+_dir = _SCRIPT_DIR
+while _dir != os.path.dirname(_dir) and not os.path.isfile(os.path.join(_dir, "pyproject.toml")):
+    _dir = os.path.dirname(_dir)
+_OUTPUT_ROOT = os.path.dirname(_dir)
 
 def get_model_short_name(model_name: str) -> str:
     """Extract a short, filesystem-safe name from the model path."""
@@ -24,8 +38,10 @@ def get_model_short_name(model_name: str) -> str:
     short_name = short_name.replace(" ", "_").replace(":", "-")
     return short_name
 
-def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS_SANITY/Gameof24results"):
+def get_output_dirs(main_model: str, base_dir: str = None):
     """Create and return output directory paths based on model name."""
+    if base_dir is None:
+        base_dir = os.path.join(_OUTPUT_ROOT, "Outputs_TTS", "Gameof24results")
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     
@@ -35,25 +51,19 @@ def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS_SANITY/G
         "csv_saved": os.path.join(output_base, "csv_saved"),
     }
     
-    # Create all directories
     for dir_path in dirs.values():
         os.makedirs(dir_path, exist_ok=True)
     
     return dirs
 
-def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_TTS_SANITY/Gameof24_results") -> str:
+def get_log_filename(main_model: str, num_examples: int, base_dir: str = None) -> str:
     """Generate log filename based on model name."""
+    if base_dir is None:
+        base_dir = os.path.join(_OUTPUT_ROOT, "Outputs_TTS", "Gameof24results")
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     os.makedirs(output_base, exist_ok=True)
     return os.path.join(output_base, f"EAT_{num_examples}examples.log")
-
-def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs_TTS_SANITY/Gameof24_results") -> str:
-    """Generate token CSV filename based on model name."""
-    model_short_name = get_model_short_name(main_model)
-    output_base = os.path.join(base_dir, model_short_name)
-    os.makedirs(output_base, exist_ok=True)
-    return os.path.join(output_base, f"EAT_{num_examples}examples.csv")
 
 def save_prompt(idx, prompt_with_answer, reason_dir):
     filename = os.path.join(reason_dir, f"reason_{idx}.txt")
@@ -63,11 +73,7 @@ def save_prompt(idx, prompt_with_answer, reason_dir):
 logger = logging.getLogger(__name__)
 
 
-def load_game24_dataset():
-    ds = load_dataset("nlile/24-game", split="train")
-    return ds
-
-def init_llm_server(modelname, max_tokens=200, port=8000):
+def init_llm_server(modelname, max_tokens=32768, port=8000):
     url = f"http://localhost:{port}/v1/completions"
     payload = {
         "model": modelname,
@@ -75,13 +81,13 @@ def init_llm_server(modelname, max_tokens=200, port=8000):
         "top_k": 20,
         "top_p": 0.95,
         "min_p": 0.0,
-        "do_sample" : True,
+        "do_sample": True,
         "temperature": 0.6,
         "stream": True,
         "logprobs": 20,
         "use_beam_search": False,
         "prompt_cache": True,
-        "seed" : 42
+        "seed": 42
     }
     headers = {"Content-Type": "application/json"}
     return {"url": url, "payload": payload, "headers": headers}
@@ -232,17 +238,16 @@ def evaluate_game24_answer(answer, nums):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Game of 24 step-by-step solver with monitors")
-    parser.add_argument("--thinking", "-t", action="store_true", help="Enable chain-of-thought output")
-    parser.add_argument("--monitor", "-m", default = True, action="store_true", help="Enable step-by-step monitor")
     parser.add_argument("--num_examples", "-n", type=int, default=1362, help="Number of examples to run")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logs")
     parser.add_argument("--newline_threshold", type=int, default=20, help="Number of newlines in thinking before forcing step verification")
-    parser.add_argument("--main_model", type=str, default=MAIN_MODEL, help="Main model to use for generation")
-    parser.add_argument("--earlystop_model", type=str, default=EARLYSTOP_MODEL, help="Model to use for early stopping")
+    parser.add_argument("--max_corrections", type=int, default=3, help="Maximum number of correction attempts per example")
+    parser.add_argument("--warmup", type=int, default=4, help="Number of \\n to skip before starting side-chain verification")
+    parser.add_argument("--model", type=str, default=MAIN_MODEL, help="Main model to use for generation")
+    parser.add_argument("--port", type=int, default=8000, help="vLLM server port")
     args = parser.parse_args()
 
-    main_model = args.main_model
-    earlystop_model = args.earlystop_model
+    main_model = args.model
 
     output_dirs = get_output_dirs(main_model)
     logfile = get_log_filename(main_model, args.num_examples)
@@ -261,12 +266,13 @@ if __name__ == "__main__":
     )
 
     logger.info(f"Main model: {main_model}")
-    logger.info(f"Early stop model: {earlystop_model}")
     logger.info(f"Output directory: {output_dirs['base']}")
+    logger.info(f"Newline threshold: {args.newline_threshold}")
+    logger.info(f"Warmup: {args.warmup}")
 
-    dataset = load_game24_dataset()
+    dataset = load_dataset("nlile/24-game", split="train")
 
-    llm_server = init_llm_server(main_model, max_tokens=32768, port=8000)
+    llm_server = init_llm_server(main_model, port=args.port)
 
     logger.info(f"Loading tokenizer for {main_model}...")
     tokenizer = AutoTokenizer.from_pretrained(main_model, trust_remote_code=True)
@@ -285,33 +291,34 @@ if __name__ == "__main__":
         example = dataset[idx]
         nums = example["numbers"]
         prompt = build_prompt(nums)
+        full_prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
 
-        if args.monitor:
-            monitors=(ThinkingPhaseStepVerifierGame24Monitor(
-                name="game24_verifier",
-                original_numbers=nums,
-                llm_server=llm_server,
-                prompt=f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
-                newline_threshold=args.newline_threshold,
-                max_corrections=3,
-                answer_start_token="</think>",
-                warmup_newlines=4,
-            ),)
-        else:
-            monitors = ()
+        monitor = ThinkingPhaseStepVerifierGame24Monitor(
+            name="game24_verifier",
+            original_numbers=nums,
+            llm_server=llm_server,
+            prompt=full_prompt,
+            newline_threshold=args.newline_threshold,
+            max_corrections=args.max_corrections,
+            answer_start_token="</think>",
+            warmup_newlines=args.warmup,
+        )
 
-        logger.info(f"---- length of monitors {len(monitors)} ----")
         logger.info(f"---- Example {idx+1} ----")
         logger.info(f"Numbers: {nums}")
 
-        answer = asyncio.run(stream_completion(
-            f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
-            llm_server=llm_server,
-            monitors=monitors,
-            add_delay=False,
-            termination_requires_validation=False,
-            async_execution=True
-        ))
+        try:
+            answer = asyncio.run(stream_completion(
+                full_prompt,
+                llm_server=llm_server,
+                monitors=(monitor,),
+                add_delay=False,
+                termination_requires_validation=False,
+                async_execution=True
+            ))
+        except Exception as e:
+            logger.error(f"Error running example {idx}: {e}")
+            continue
 
         save_prompt(idx, answer, reason_dir)
         logger.info(f"Raw final output:\n{answer}")
@@ -352,8 +359,7 @@ if __name__ == "__main__":
         f.write(f"Game of 24 Evaluation Results\n")
         f.write(f"{'='*50}\n\n")
         f.write(f"Model: {main_model}\n")
-        f.write(f"Number of Examples: {N}\n")
-        f.write(f"Monitor Enabled: {args.monitor}\n\n")
+        f.write(f"Number of Examples: {N}\n\n")
         f.write(f"Results:\n")
         f.write(f"---------\n")
         f.write(f"Correct: {num_correct}/{N}\n")

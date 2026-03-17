@@ -15,7 +15,6 @@ import logging
 import os
 import re
 import numpy as np
-from pathlib import Path
 
 from datasets import load_dataset
 from transformers import AutoTokenizer
@@ -30,6 +29,14 @@ logger = logging.getLogger(__name__)
 MAIN_MODEL = "Qwen/QwQ-32B"
 # =================================================
 
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Walk up to find the repo root (contains pyproject.toml), output to its parent
+_dir = _SCRIPT_DIR
+while _dir != os.path.dirname(_dir) and not os.path.isfile(os.path.join(_dir, "pyproject.toml")):
+    _dir = os.path.dirname(_dir)
+_OUTPUT_ROOT = os.path.dirname(_dir)
+
 
 def get_model_short_name(model_name: str) -> str:
     """Extract a short, filesystem-safe name from the model path."""
@@ -38,8 +45,10 @@ def get_model_short_name(model_name: str) -> str:
     return short_name
 
 
-def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS_SANITY/SpatialMapResults"):
+def get_output_dirs(main_model: str, base_dir: str = None):
     """Create and return output directory paths based on model name."""
+    if base_dir is None:
+        base_dir = os.path.join(_OUTPUT_ROOT, "Outputs_TTS", "SpatialMapResults")
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     
@@ -130,15 +139,6 @@ def init_llm_server(model_name, max_tokens=20480, port=8000):
     return {"url": url, "payload": payload, "headers": headers}
 
 
-def save_output(idx: int, output: str, output_dir: str):
-    """Save output to file."""
-    os.makedirs(output_dir, exist_ok=True)
-    filepath = os.path.join(output_dir, f"output_{idx}.txt")
-    with open(filepath, 'w') as f:
-        f.write(output)
-    logger.info(f"Saved output to {filepath}")
-
-
 def save_prompt(idx, prompt_with_answer, reason_dir):
     """Save reasoning trace to file."""
     os.makedirs(reason_dir, exist_ok=True)
@@ -194,9 +194,9 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000, help="vLLM server port")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logging")
     parser.add_argument("--newline_threshold", type=int, default=20,
-                        help="Number of \\\\n\\\\n in thinking before triggering side verification")
+                        help="Number of \\n in thinking before triggering side verification")
     parser.add_argument("--warmup", type=int, default=0,
-                        help="Number of \\\\n\\\\n to skip before starting side-chain verification (warmup period)")
+                        help="Number of \\n to skip before starting side-chain verification (warmup period)")
     args = parser.parse_args()
 
     logger.info(f"Thinking-phase verification: always on")

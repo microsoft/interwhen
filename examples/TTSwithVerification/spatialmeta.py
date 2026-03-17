@@ -11,7 +11,6 @@ import logging
 import os
 import re
 import numpy as np
-from pathlib import Path
 
 from datasets import load_dataset
 from transformers import AutoTokenizer
@@ -23,8 +22,16 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 # ============== MODEL CONFIGURATION ==============
-MAIN_MODEL = "microsoft/Phi-4-reasoning"
+MAIN_MODEL = "Qwen/QwQ-32B"
 # =================================================
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Walk up to find the repo root (contains pyproject.toml), output to its parent
+_dir = _SCRIPT_DIR
+while _dir != os.path.dirname(_dir) and not os.path.isfile(os.path.join(_dir, "pyproject.toml")):
+    _dir = os.path.dirname(_dir)
+_OUTPUT_ROOT = os.path.dirname(_dir)
 
 
 def get_model_short_name(model_name: str) -> str:
@@ -34,8 +41,10 @@ def get_model_short_name(model_name: str) -> str:
     return short_name
 
 
-def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/SpatialMapResults/metaPrompt"):
+def get_output_dirs(main_model: str, base_dir: str = None):
     """Create and return output directory paths based on model name."""
+    if base_dir is None:
+        base_dir = os.path.join(_OUTPUT_ROOT, "Outputs_TTS", "SpatialMapResults", "metaPrompt")
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     
@@ -53,6 +62,14 @@ def get_output_dirs(main_model: str, base_dir: str = "../../Outputs_TTS/SpatialM
 def remove_last_paragraph(s: str) -> str:
     """Remove the last instruction paragraph from the prompt."""
     return s[:-143] if len(s) > 143 else s
+
+
+def save_prompt(idx, prompt_with_answer, reason_dir):
+    """Save reasoning trace to a text file."""
+    os.makedirs(reason_dir, exist_ok=True)
+    filename = os.path.join(reason_dir, f"reason_{idx}.txt")
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(prompt_with_answer)
 
 
 def get_question_type(idx: int) -> str:
@@ -265,15 +282,17 @@ def count_tokens(text: str, tokenizer) -> int:
     return len(tokens)
 
 
-def init_llm_server(model_name, max_tokens=22000, port=8001):
+def init_llm_server(model_name, max_tokens=32768, port=8000):
     """Initialize LLM server configuration."""
     url = f"http://localhost:{port}/v1/completions"
     payload = {
         "model": model_name,
         "max_tokens": max_tokens,
-        "top_k": 50,
+        "top_k": 20,
         "top_p": 0.95,
-        "temperature": 0.8,
+        "min_p": 0.0,
+        "do_sample": True,
+        "temperature": 0.6,
         "stream": True,
         "logprobs": 20,
         "use_beam_search": False,
@@ -282,15 +301,6 @@ def init_llm_server(model_name, max_tokens=22000, port=8001):
     }
     headers = {"Content-Type": "application/json"}
     return {"url": url, "payload": payload, "headers": headers}
-
-
-def save_output(idx: int, output: str, output_dir: str):
-    """Save output to file."""
-    os.makedirs(output_dir, exist_ok=True)
-    filepath = os.path.join(output_dir, f"output_{idx}.txt")
-    with open(filepath, 'w') as f:
-        f.write(output)
-    logger.info(f"Saved output to {filepath}")
 
 def evaluate_spatialmap_answer(answer, options, ground_truth):
     """
@@ -408,8 +418,8 @@ if __name__ == "__main__":
         # Determine question type
         question_type = get_question_type(idx)
         
-        # Build full prompt with Phi-4-reasoning ChatML format
-        full_prompt = f"<|im_start|>system<|im_sep|>\n{system_prompt}<|im_end|>\n<|im_start|>user<|im_sep|>\n{user_prompt}<|im_end|>\n<|im_start|>assistant<|im_sep|>\n<think>\n"
+        # Build full prompt with ChatML format
+        full_prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n"
         
         logger.info(f"\n{'='*60}")
         logger.info(f"Example {idx} ({question_type})")
@@ -459,7 +469,7 @@ if __name__ == "__main__":
         total_examples += 1
         stats_by_type[question_type]["total"] += 1
         # Save output
-        save_output(idx, answer, reason_dir)
+        save_prompt(idx, answer, reason_dir)
         
         # Log result
         result = {

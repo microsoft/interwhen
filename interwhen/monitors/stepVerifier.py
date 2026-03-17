@@ -1,52 +1,25 @@
 import re
+import logging
 from typing import List, Tuple, Optional, Set, Dict
 from .base import VerifyMonitor
+from ._common import find_complete_boxed
 from ..utils.game24_verifier import parse_step, verify_step, format_feedback
 from ..utils.maze_verifier import (
     Direction, parse_direction, parse_maze_step, verify_maze_step,
     verify_locate_section, format_maze_feedback, format_locate_feedback,
-    parse_maze_from_prompt
+    parse_maze_from_prompt, compute_relative_direction,
 )
 from ..utils.spatialmap_verifier import (
     SpatialMapZ3Solver, parse_directional_claims_from_text,
-    extract_step2_claims, verify_spatialmap_step, format_spatialmap_feedback
+    extract_step2_claims, verify_spatialmap_step, format_spatialmap_feedback,
+    parse_counting_question, parse_model_count_from_answer,
+    parse_direction_question, parse_object_question,
+    parse_model_boxed_answer,
+    get_possible_directions, get_consistent_object_options,
+    get_possible_count_range,
 )
 
-
-def _find_complete_boxed(text: str):
-    """Find a complete \\boxed{...} in text, handling nested braces.
-
-    Returns a match-like object with .start() and .end(), or None.
-    """
-    idx = 0
-    while idx < len(text):
-        pos = text.find(r'\boxed{', idx)
-        if pos == -1:
-            return None
-        brace_start = pos + len(r'\boxed{')
-        depth = 1
-        i = brace_start
-        while i < len(text) and depth > 0:
-            if text[i] == '{':
-                depth += 1
-            elif text[i] == '}':
-                depth -= 1
-            i += 1
-        if depth == 0:
-            content = text[brace_start:i - 1].strip()
-            if content:
-                class _BoxedMatch:
-                    def __init__(self, s, e):
-                        self._start, self._end = s, e
-                    def start(self):
-                        return self._start
-                    def end(self):
-                        return self._end
-                    def group(self, n=0):
-                        return text[self._start:self._end]
-                return _BoxedMatch(pos, i)
-        idx = pos + 1
-    return None
+logger = logging.getLogger(__name__)
 
 
 class StepVerifierGame24Monitor(VerifyMonitor):
@@ -331,7 +304,8 @@ class StepVerifierMazeMonitor(VerifyMonitor):
         exit_pos: Tuple[int, int],
         max_corrections: int = 5,
         question_type: str = "right_turns",  # "right_turns", "total_turns", "relative_position"
-        async_execution: bool = True
+        async_execution: bool = True,
+        prompt: str = None,
     ):
         super().__init__(name)
         self.async_execution = async_execution
@@ -341,6 +315,7 @@ class StepVerifierMazeMonitor(VerifyMonitor):
         self.exit_pos = exit_pos
         self.max_corrections = max_corrections
         self.question_type = question_type
+        self.prompt = prompt
 
     @staticmethod
     def detect_question_type(prompt: str) -> str:
@@ -411,7 +386,8 @@ class StepVerifierMazeMonitor(VerifyMonitor):
             exit_pos=exit_pos,
             max_corrections=max_corrections,
             question_type=question_type,
-            async_execution=async_execution
+            async_execution=async_execution,
+            prompt=prompt,
         )
 
     def _count_feedback_blocks(self, text: str) -> int:
@@ -639,18 +615,72 @@ class StepVerifierMazeMonitor(VerifyMonitor):
         
         return chunk, feedback
 
+    def _verify_relative_position_answer(self, boxed_answer: str) -> Tuple[bool, Optional[str]]:
+        """Verify a relative-position boxed answer (A=Yes / B=No).
+
+        Parses the question from ``self.prompt`` to determine the asked
+        direction, computes the true relative direction of E from S,
+        and checks whether the model's Yes/No answer is correct.
+
+        Returns ``(is_correct, feedback_or_None)``.
+        """
+        if self.prompt is None:
+            return True, None
+
+        answer_map = {"A": "Yes", "B": "No"}
+        model_yn = answer_map.get(boxed_answer.strip().upper())
+        if model_yn is None:
+            return True, None
+
+        m = re.search(
+            r'Is the exit \(E\)\s+(.*?)\s+(?:of\s+)?the starting point \(S\)',
+            self.prompt, re.IGNORECASE,
+        )
+        if not m:
+            return True, None
+
+        asked_raw = m.group(1).strip().lower()
+        asked_raw = re.sub(r',.*', '', asked_raw).strip()
+
+        actual = compute_relative_direction(self.start_pos, self.exit_pos)
+
+        direction_keywords = {
+            "directly to the left":   {"west"},
+            "directly to the right":  {"east"},
+            "directly above":         {"north"},
+            "directly below":         {"south"},
+            "to the top left":        {"northwest"},
+            "to the top right":       {"northeast"},
+            "to the bottom left":     {"southwest"},
+            "to the bottom right":    {"southeast"},
+        }
+
+        expected_dirs = direction_keywords.get(asked_raw)
+        if expected_dirs is None:
+            return True, None
+
+        expected_yn = "Yes" if actual in expected_dirs else "No"
+
+        if model_yn == expected_yn:
+            return True, None
+
+        feedback = (
+            f"\n\n[VERIFIER FEEDBACK for relative position:\n"
+            f"  ✗ Your answer {boxed_answer} ({model_yn}) is incorrect.\n"
+            f"  IMPORTANT: In this task, \"{asked_raw}\" means the GENERAL "
+            f"COMPASS DIRECTION, NOT immediate adjacency. It asks whether E "
+            f"is in the {actual} direction from S, regardless of distance or "
+            f"walls between them.]\n\n"
+        )
+        return False, feedback
+
     async def _verify_relative_position(self, chunk: str, token_index: int, event, event_info: dict):
         """
         Verify relative position answer.
         
-        For relative_position questions (Yes/No format), we only verify:
+        For relative_position questions (Yes/No format), we verify:
         1. The LOCATE section (S and E positions are correctly identified)
-        
-        We do NOT verify the final Yes/No answer because:
-        - The question asks "Is E to the [direction] of S?" 
-        - We don't have the question text here to know what direction was asked
-        - The comparison logic (row/col arithmetic) is straightforward
-        - If LOCATE is correct, the model should get the answer right
+        2. The boxed answer (A=Yes / B=No) against the computed direction
         """
         # Check LOCATE section for correct S and E positions
         locate_valid, locate_errors, locate_found = self._check_locate_section(chunk)
@@ -665,8 +695,27 @@ class StepVerifierMazeMonitor(VerifyMonitor):
                 event.set()
             return chunk, feedback
         
-        # For relative_position, we don't verify the final Yes/No answer
-        # Just let it complete once LOCATE is verified
+        # Check for boxed answer and verify it
+        if '</think>' in chunk:
+            text_after_think = chunk.split("</think>")[-1]
+            boxed_match = find_complete_boxed(text_after_think)
+            if boxed_match:
+                boxed_text = text_after_think[boxed_match.start():boxed_match.end()]
+                # Extract the letter from \boxed{X}
+                inner = re.search(r'\\boxed\{([^}]*)\}', boxed_text)
+                if inner:
+                    boxed_answer = inner.group(1).strip()
+                    is_correct, rp_feedback = self._verify_relative_position_answer(boxed_answer)
+                    if not is_correct and rp_feedback:
+                        if not event.is_set():
+                            event_info["generated_text"] = chunk
+                            event_info["feedback"] = rp_feedback
+                            event_info["correction_index"] = token_index
+                            event_info["errors"] = [f"Wrong relative position answer: {boxed_answer}"]
+                            event_info["failed_step"] = None
+                            event.set()
+                        return chunk, rp_feedback
+
         return chunk, None
 
     async def fix(self, generated_text: str, event_info: dict, fix_method=None) -> str:
@@ -775,7 +824,7 @@ class StepVerifierMazeMonitor(VerifyMonitor):
         3. LOCATE section is complete and analysis has started (verify LOCATE)
         """
         # Check for boxed answer first (highest priority)
-        boxed_match = _find_complete_boxed(text)
+        boxed_match = find_complete_boxed(text)
         if boxed_match:
             # Found answer, verify it (include full text up to boxed answer)
             end_pos = text_start_in_generated + boxed_match.end()
@@ -847,6 +896,42 @@ class StepVerifierSpatialMapMonitor(VerifyMonitor):
         
         # Track verified claims to avoid re-checking
         self.verified_claims: Set[Tuple[str, str, str]] = set()
+
+        # ---- question-type detection (consistent with ThinkingPhaseVerifier) ----
+        self._counting_question = parse_counting_question(problem_text)
+        self._counting_options: Dict[str, str] = {}
+        _opts_text = re.split(r'\nFirst,', problem_text, maxsplit=1)[0]
+        if self._counting_question:
+            raw_opts = re.findall(
+                r'([A-D])\.\s*(.+?)\s*(?=[A-D]\.|$)',
+                _opts_text, flags=re.DOTALL,
+            )
+            self._counting_options = {
+                k: v.strip().rstrip(".") for k, v in raw_opts
+            }
+
+        self._direction_question = parse_direction_question(problem_text)
+        self._object_question = parse_object_question(problem_text)
+
+        # Generic MCQ options (for direction & object Qs too)
+        if not self._counting_options:
+            raw_opts = re.findall(
+                r'([A-D])\.\s*(.+?)\s*(?=[A-D]\.|$)',
+                _opts_text, flags=re.DOTALL,
+            )
+            self._mcq_options: Dict[str, str] = {
+                k: v.strip().rstrip(".") for k, v in raw_opts
+            }
+        else:
+            self._mcq_options = dict(self._counting_options)
+
+        # Retry limits for final-answer verification
+        self._max_final_answer_retries = 3
+        self._direction_feedback_count = 0
+        self._object_feedback_count = 0
+        self._diag_count_feedback_count = 0
+        self._count_feedback_given = False
+        self._count_feedback_blocks_count = 0
     
     @classmethod
     def from_prompt(
@@ -897,8 +982,13 @@ class StepVerifierSpatialMapMonitor(VerifyMonitor):
         # Only look at text after the last feedback
         text_to_check = text_after_think[last_feedback_end:]
         
+        # Get full entity names from Z3 solver for abbreviation resolution
+        entity_names = list({
+            k[:-2] for k in self.z3_solver.entities if k.endswith('_x')
+        })
+        
         # Extract claims from STEP 2 in the latest attempt only
-        all_claims = extract_step2_claims(text_to_check)
+        all_claims = extract_step2_claims(text_to_check, entity_names=entity_names)
         
         # Filter to only new claims (not yet verified)
         new_claims = []
@@ -965,7 +1055,282 @@ class StepVerifierSpatialMapMonitor(VerifyMonitor):
                 
                 return chunk, feedback
         
-        # All claims valid
+        # All claims valid — check for boxed answer (final answer verification)
+        if '</think>' in chunk:
+            text_after_think = chunk.split("</think>")[-1]
+            feedback_pattern = re.compile(r'\[VERIFIER FEEDBACK[^\]]*\]\s*', re.DOTALL)
+            last_feedback_end = 0
+            for match in feedback_pattern.finditer(text_after_think):
+                last_feedback_end = match.end()
+            recent_text = text_after_think[last_feedback_end:]
+
+            boxed_match = find_complete_boxed(recent_text)
+            if boxed_match:
+                # --- Direction-question verification ---
+                if (
+                    self._direction_question
+                    and num_corrections < self.max_corrections
+                    and self._direction_feedback_count < self._max_final_answer_retries
+                ):
+                    model_dir_text = parse_model_boxed_answer(
+                        recent_text, self._mcq_options
+                    )
+                    if model_dir_text:
+                        possible = get_possible_directions(
+                            self.z3_solver,
+                            self._direction_question["entity_a"],
+                            self._direction_question["entity_b"],
+                        )
+                        if model_dir_text not in possible:
+                            self._direction_feedback_count += 1
+                            valid_options = [
+                                letter for letter, val in self._mcq_options.items()
+                                if val.strip().lower().rstrip(".") in possible
+                            ]
+                            if len(valid_options) == 1:
+                                feedback = (
+                                    f"\n\n[VERIFIER FEEDBACK: Direction error!\n"
+                                    f"  '{model_dir_text.title()}' is "
+                                    f"impossible for "
+                                    f"{self._direction_question['entity_a']} "
+                                    f"relative to "
+                                    f"{self._direction_question['entity_b']} "
+                                    f"based on the given constraints.]\n\n"
+                                    f">>> STEP 3: ANSWER\n"
+                                )
+                            else:
+                                feedback = (
+                                    f"\n\n[VERIFIER FEEDBACK: Direction error!\n"
+                                    f"  '{model_dir_text.title()}' is "
+                                    f"impossible for "
+                                    f"{self._direction_question['entity_a']} "
+                                    f"relative to "
+                                    f"{self._direction_question['entity_b']} "
+                                    f"based on the given constraints.\n"
+                                    f"  Please reconsider and choose the "
+                                    f"correct option.]\n\n"
+                                    f">>> STEP 3: ANSWER\n"
+                                )
+                            if not event.is_set():
+                                event_info["generated_text"] = chunk
+                                event_info["feedback"] = feedback
+                                event_info["correction_index"] = token_index
+                                event_info["errors"] = [
+                                    f"Direction '{model_dir_text}' impossible; "
+                                    f"possible: {possible}"
+                                ]
+                                event_info["failed_step"] = None
+                                event.set()
+                            return chunk, feedback
+
+                # --- Object-question verification ---
+                if (
+                    self._object_question
+                    and num_corrections < self.max_corrections
+                    and self._object_feedback_count < self._max_final_answer_retries
+                ):
+                    model_obj_text = parse_model_boxed_answer(
+                        recent_text, self._mcq_options
+                    )
+                    boxed_raw = re.findall(
+                        r'\\boxed\{([^}]*)\}', recent_text
+                    )
+                    model_letter = (
+                        boxed_raw[-1].strip().upper() if boxed_raw else None
+                    )
+
+                    if model_letter:
+                        consistent = get_consistent_object_options(
+                            self.z3_solver,
+                            self._object_question["direction"],
+                            self._object_question["reference"],
+                            self._mcq_options,
+                        )
+                        if model_letter not in consistent:
+                            self._object_feedback_count += 1
+                            odir = self._object_question["direction"]
+                            oref = self._object_question["reference"]
+                            if len(consistent) == 1:
+                                correct_name = self._mcq_options.get(
+                                    consistent[0], consistent[0]
+                                )
+                                feedback = (
+                                    f"\n\n[VERIFIER FEEDBACK: Object error!\n"
+                                    f"  '{model_obj_text}' cannot be "
+                                    f"{odir} of {oref} based on the "
+                                    f"given constraints.\n"
+                                    f"  The only consistent option is "
+                                    f"{consistent[0]}. {correct_name}.\n"
+                                    f"  Please select option "
+                                    f"{consistent[0]}.]\n\n"
+                                    f">>> STEP 3: ANSWER\n"
+                                )
+                            else:
+                                valid_names = [
+                                    f"{l}. {self._mcq_options.get(l, l)}"
+                                    for l in consistent
+                                ]
+                                feedback = (
+                                    f"\n\n[VERIFIER FEEDBACK: Object error!\n"
+                                    f"  '{model_obj_text}' cannot be "
+                                    f"{odir} of {oref} based on the "
+                                    f"given constraints.\n"
+                                    f"  The consistent options are: "
+                                    f"{', '.join(valid_names)}.\n"
+                                    f"  Please reconsider and choose the "
+                                    f"correct option.]\n\n"
+                                    f">>> STEP 3: ANSWER\n"
+                                )
+                            if not event.is_set():
+                                event_info["generated_text"] = chunk
+                                event_info["feedback"] = feedback
+                                event_info["correction_index"] = token_index
+                                event_info["errors"] = [
+                                    f"Object '{model_obj_text}' impossible "
+                                    f"in {odir} of {oref}; "
+                                    f"consistent: {consistent}"
+                                ]
+                                event_info["failed_step"] = None
+                                event.set()
+                            return chunk, feedback
+
+                # --- Counting-question verification ---
+                if (
+                    self._counting_question
+                    and num_corrections < self.max_corrections
+                ):
+                    direction = self._counting_question["direction"]
+                    reference = self._counting_question["reference"]
+                    is_cardinal = direction in (
+                        "north", "south", "east", "west"
+                    )
+
+                    if is_cardinal:
+                        model_count = parse_model_count_from_answer(
+                            recent_text, self._counting_options
+                        )
+                        z3_count = 0
+
+                        if (
+                            model_count is not None
+                            and model_count != z3_count
+                        ):
+                            self._count_feedback_given = True
+                            self._count_feedback_blocks_count += 1
+
+                            if direction in ("north", "south"):
+                                diag_examples = "northeast or northwest"
+                            elif direction == "west":
+                                diag_examples = "northwest or southwest"
+                            else:
+                                diag_examples = "northeast or southeast"
+
+                            feedback = (
+                                f"\n\n[VERIFIER FEEDBACK: Count mismatch!\n"
+                                f"  You answered {model_count} objects "
+                                f"'{direction}' of {reference}, but this "
+                                f"count is incorrect.\n"
+                                f"  IMPORTANT: '{direction}' is a strict "
+                                f"cardinal direction — it means ONLY "
+                                f"exactly {direction}, NOT {diag_examples}."
+                                f"\n"
+                                f"  An object that is {diag_examples.split(' or ')[0]} of "
+                                f"{reference} is NOT {direction} of "
+                                f"{reference}.\n"
+                                f"  Re-examine each object: is it described "
+                                f"as being strictly '{direction} of' "
+                                f"{reference}, or is the relationship "
+                                f"actually a diagonal direction like "
+                                f"{diag_examples}? Only count objects that "
+                                f"are strictly {direction}.]\n\n"
+                                f">>> STEP 3: ANSWER\n"
+                            )
+
+                            if not event.is_set():
+                                event_info["generated_text"] = chunk
+                                event_info["feedback"] = feedback
+                                event_info["correction_index"] = token_index
+                                event_info["errors"] = [
+                                    f"Cardinal count mismatch: expected 0, "
+                                    f"got {model_count}"
+                                ]
+                                event_info["failed_step"] = None
+                                event.set()
+                            return chunk, feedback
+
+                    else:
+                        if self._diag_count_feedback_count < self._max_final_answer_retries:
+                            model_count = parse_model_count_from_answer(
+                                recent_text, self._counting_options
+                            )
+                            count_range = get_possible_count_range(
+                                self.z3_solver, reference, direction
+                            )
+
+                            if (
+                                model_count is not None
+                                and count_range is not None
+                            ):
+                                min_c, max_c = count_range
+
+                                if not (min_c <= model_count <= max_c):
+                                    self._diag_count_feedback_count += 1
+                                    valid_opts = []
+                                    for opt, val in (
+                                        self._counting_options.items()
+                                    ):
+                                        try:
+                                            v = int(val)
+                                            if min_c <= v <= max_c:
+                                                valid_opts.append(
+                                                    (opt, v)
+                                                )
+                                        except (ValueError, TypeError):
+                                            pass
+
+                                    if len(valid_opts) == 1:
+                                        feedback = (
+                                            f"\n\n[VERIFIER FEEDBACK: "
+                                            f"Count error!\n"
+                                            f"  {model_count} objects "
+                                            f"'{direction}' of {reference}"
+                                            f" is impossible.\n"
+                                            f"  The valid count is "
+                                            f"{valid_opts[0][1]}.\n"
+                                            f"  Please select option "
+                                            f"{valid_opts[0][0]}.]\n\n"
+                                            f">>> STEP 3: ANSWER\n"
+                                        )
+                                    else:
+                                        feedback = (
+                                            f"\n\n[VERIFIER FEEDBACK: "
+                                            f"Count error!\n"
+                                            f"  {model_count} objects "
+                                            f"'{direction}' of {reference}"
+                                            f" is impossible.\n"
+                                            f"  The possible count range "
+                                            f"is [{min_c}, {max_c}].\n"
+                                            f"  Please reconsider and "
+                                            f"choose the correct "
+                                            f"option.]\n\n"
+                                            f">>> STEP 3: ANSWER\n"
+                                        )
+
+                                    if not event.is_set():
+                                        event_info["generated_text"] = chunk
+                                        event_info["feedback"] = feedback
+                                        event_info["correction_index"] = (
+                                            token_index
+                                        )
+                                        event_info["errors"] = [
+                                            f"Diagonal count "
+                                            f"{model_count} outside "
+                                            f"range [{min_c}, {max_c}]"
+                                        ]
+                                        event_info["failed_step"] = None
+                                        event.set()
+                                    return chunk, feedback
+
         return chunk, None
 
     async def fix(self, generated_text: str, event_info: dict, fix_method=None) -> str:
@@ -1025,12 +1390,16 @@ class StepVerifierSpatialMapMonitor(VerifyMonitor):
                     return True, generated_text[:end_pos]
         
         # Check for boxed answer (trigger final verification)
-        boxed_match = _find_complete_boxed(text)
+        boxed_match = find_complete_boxed(text)
         if boxed_match:
             # Verify any remaining claims before final answer
             new_claims = self._extract_new_claims(generated_text)
             if new_claims:
                 end_pos = text_start_in_generated + boxed_match.end()
                 return True, generated_text[:end_pos]
+            # Even if no new claims, boxed answer signals completion —
+            # trigger to allow final answer verification (direction/object/counting)
+            end_pos = text_start_in_generated + boxed_match.end()
+            return True, generated_text[:end_pos]
         
         return False, None
