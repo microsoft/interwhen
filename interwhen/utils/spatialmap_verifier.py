@@ -725,7 +725,7 @@ def get_possible_count_range(
 
     Returns ``None`` if the reference entity cannot be found.
     """
-    from z3 import And as Z3And, Not as Z3Not, sat as z3sat
+    from z3 import And as Z3And, Not as Z3Not, sat as z3sat, unsat as z3unsat
 
     direction = direction.lower().strip()
     if direction in ('north', 'south', 'east', 'west'):
@@ -782,7 +782,7 @@ def get_possible_count_range(
         # Must it be?
         solver.solver.push()
         solver.solver.add(Z3Not(c))
-        must_be = solver.solver.check() != z3sat
+        must_be = solver.solver.check() == z3unsat
         solver.solver.pop()
 
         if must_be:
