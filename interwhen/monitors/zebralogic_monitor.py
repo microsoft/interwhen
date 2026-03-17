@@ -18,7 +18,7 @@ class ZebraLogicMonitor(VerifyMonitor):
         instance: Processed ZebraLogic problem dict (from get_zebralogic_dataset).
         llm: Model name for the LLM server.
         tokenizer: HuggingFace tokenizer (must support apply_chat_template).
-        step_interval: Poll every N occurrences of the step token.
+        step_interval: Verify every N occurrences of the step token.
         step_token: Token string that delimits steps.
         port: vLLM server port.
         max_corrections: Maximum number of feedback injections before stopping.
@@ -74,7 +74,7 @@ class ZebraLogicMonitor(VerifyMonitor):
         return ZebraLogicProblem(self.instance)
 
     def _llm_call(self, input_text: str):
-        """Make an LLM completion call to poll for current state."""
+        """Make an LLM completion call to extract for current state."""
         response = self.client.completions.create(
             model=self.llm,
             prompt=input_text,
@@ -147,9 +147,9 @@ class ZebraLogicMonitor(VerifyMonitor):
         return generated_text.endswith(self.step_token) and generated_text.count(self.step_token) % self.step_interval == 0, generated_text
 
     async def verify(self, chunk: str, token_index: int, event, event_info: dict):
-        """Poll the LLM for current state and verify assignments against Z3.
+        """Extract the current state from the LLM and verify assignments against Z3.
 
-        Appends a state-poll prompt suffix to the current generation, makes an LLM
+        Appends a state-extract prompt suffix to the current generation, makes an LLM
         call to produce a JSON state snapshot, then validates each assignment.
 
         Args:
@@ -170,7 +170,7 @@ class ZebraLogicMonitor(VerifyMonitor):
                 event.set()
             return
 
-        # Append poll suffix to elicit state JSON from the LLM
+        # Append state extraction suffix to elicit state JSON from the LLM
         suffix = "\nOk let me note down the current partial assignments that I'm sure of, for reference.</think>\n```json\n{\n\"House "
         input = self.system_prompt + chunk + suffix
         
@@ -178,7 +178,7 @@ class ZebraLogicMonitor(VerifyMonitor):
         try:
             text, usage = self._llm_call(input)
         except Exception as e:
-            logger.warning("LLM poll call failed at token_index=%d: %s", token_index, e)
+            logger.warning("LLM state-extract call failed at token_index=%d: %s", token_index, e)
             return
 
         output = chunk + suffix + text

@@ -132,13 +132,13 @@ def _run_wrapper(args_problem):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ZebraLogic LLM Solver with StatePoll Monitor")
+    parser = argparse.ArgumentParser(description="ZebraLogic LLM Solver with Forking Monitor")
     parser.add_argument('--solver_lm', type=str,
                         help='Solver LLM model name')
     parser.add_argument('--port', type=int, default=8000,
                         help='vLLM server port')
     parser.add_argument('--monitor', '-m', action='store_true',
-                        help='Enable StatePoll monitor mode')
+                        help='Enable Forking monitor mode')
     parser.add_argument('--monitor_max_corrections', type=int, default=50,
                         help='Maximum monitor feedback corrections per problem')
     parser.add_argument('--step_token', type=str, default='\n\n',
