@@ -13,7 +13,7 @@ Directions use a coordinate system where:
 
 import re
 from typing import Dict, List, Tuple, Optional, Set
-from z3 import Solver, Real, And, sat
+from z3 import Solver, Real, And, Not, sat, unsat
 
 
 class SpatialMapZ3Solver:
@@ -259,9 +259,8 @@ class SpatialMapZ3Solver:
             # Check if this entity MUST be in that direction
             # (i.e. the negation is unsatisfiable)
             self.solver.push()
-            from z3 import Not
             self.solver.add(Not(constraint))
-            must_be = self.solver.check() != sat
+            must_be = self.solver.check() == unsat
             self.solver.pop()
 
             if must_be:
