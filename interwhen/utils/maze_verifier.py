@@ -46,11 +46,44 @@ DIRECTION_DELTAS = {
 }
 
 
+# Map alternative direction names (cardinal) to the canonical enum names
+_DIRECTION_ALIASES = {
+    'NORTH': 'UP',
+    'SOUTH': 'DOWN',
+    'EAST': 'RIGHT',
+    'WEST': 'LEFT',
+}
+
+# Reverse mapping: enum name -> cardinal name (for feedback messages)
+_CARDINAL_NAMES = {
+    Direction.UP: 'NORTH',
+    Direction.DOWN: 'SOUTH',
+    Direction.LEFT: 'WEST',
+    Direction.RIGHT: 'EAST',
+    Direction.NONE: 'NONE',
+}
+
+
+def cardinal_name(d: Direction) -> str:
+    """Return the cardinal compass name for a Direction enum value.
+
+    Used in feedback messages so that the model (which often thinks in
+    NORTH/SOUTH/EAST/WEST terms) can understand corrections.
+    """
+    return _CARDINAL_NAMES.get(d, d.name)
+
+
 def parse_direction(dir_str: str) -> Direction:
-    """Parse direction string to Direction enum."""
+    """Parse direction string to Direction enum.
+
+    Accepts canonical names (UP/DOWN/LEFT/RIGHT) **and** cardinal names
+    (NORTH/SOUTH/EAST/WEST).
+    """
     dir_str = dir_str.strip().upper()
     if dir_str in ['—', '-', 'NONE', '']:
         return Direction.NONE
+    # Resolve cardinal aliases
+    dir_str = _DIRECTION_ALIASES.get(dir_str, dir_str)
     try:
         return Direction[dir_str]
     except KeyError:
@@ -68,6 +101,35 @@ def get_expected_turn_type(prev_dir: Direction, curr_dir: Direction) -> str:
     return 'UNKNOWN'
 
 
+# Map common turn type variations to canonical names
+_TURN_TYPE_ALIASES = {
+    'RIGHT': 'RIGHT_TURN',
+    'RIGHT TURN': 'RIGHT_TURN',
+    'RIGHT_TURN': 'RIGHT_TURN',
+    'RIGHTTURN': 'RIGHT_TURN',
+    'LEFT': 'LEFT_TURN',
+    'LEFT TURN': 'LEFT_TURN',
+    'LEFT_TURN': 'LEFT_TURN',
+    'LEFTTURN': 'LEFT_TURN',
+    'STRAIGHT': 'STRAIGHT',
+    'NONE': 'STRAIGHT',
+    'NO TURN': 'STRAIGHT',
+    'NO_TURN': 'STRAIGHT',
+    'NOTURN': 'STRAIGHT',
+}
+
+
+def normalize_turn_type(turn_str: str) -> str:
+    """Normalize a claimed turn type string to canonical form.
+
+    Accepts common variations such as ``RIGHT``, ``RIGHT TURN``,
+    ``RIGHT_TURN``, ``RIGHTTURN`` (case-insensitive) and maps them to
+    the canonical ``RIGHT_TURN`` / ``LEFT_TURN`` / ``STRAIGHT``.
+    """
+    turn_str = turn_str.strip().upper()
+    return _TURN_TYPE_ALIASES.get(turn_str, turn_str)
+
+
 def parse_maze_from_prompt(prompt: str) -> Tuple[List[List[str]], Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
     """
     Parse maze from prompt. Returns (grid, start_pos, exit_pos).
@@ -80,10 +142,22 @@ def parse_maze_from_prompt(prompt: str) -> Tuple[List[List[str]], Optional[Tuple
     
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith('#') and all(c in '#XSEX ' for c in stripped):
-            in_maze = True
-            current_maze.append(stripped)
-        elif in_maze:
+        # Some dataset entries glue the last maze row to description text,
+        # e.g. "#######, where the symbols ...".  Strip everything from the
+        # first character that isn't a valid maze cell.
+        if stripped.startswith('#'):
+            maze_part = ""
+            for ch in stripped:
+                if ch in '# XSEX':
+                    maze_part += ch
+                else:
+                    break
+            maze_part = maze_part.rstrip()
+            if maze_part and all(c in '#XSEX ' for c in maze_part):
+                in_maze = True
+                current_maze.append(maze_part)
+                continue
+        if in_maze:
             if current_maze:
                 all_mazes.append(current_maze)
             current_maze = []
@@ -162,10 +236,16 @@ def parse_maze_step(step_text: str) -> Optional[Dict[str, Any]]:
     else:
         result['claimed_curr_dir'] = None
     
-    # Extract turn type
-    turn_match = re.search(r'Turn type:\s*(\S+)', step_text)
+    # Extract turn type (handle multi-word like 'RIGHT TURN', 'LEFT_TURN', etc.)
+    # Strip parenthetical comments like 'RIGHT (DOWN → LEFT is a RIGHT turn)'
+    turn_match = re.search(r'Turn type:\s*(.+)', step_text)
     if turn_match:
-        result['claimed_turn'] = turn_match.group(1).upper()
+        turn_raw = turn_match.group(1).strip()
+        # Remove parenthetical comments: "RIGHT (DOWN → LEFT ...)" → "RIGHT"
+        turn_raw = re.sub(r'\s*\(.*', '', turn_raw)
+        # Also strip trailing punctuation/whitespace
+        turn_raw = turn_raw.strip().rstrip(':')
+        result['claimed_turn'] = normalize_turn_type(turn_raw)
     else:
         result['claimed_turn'] = None
     
@@ -239,7 +319,10 @@ def verify_maze_step(
     if expected_delta:
         actual_delta = (to_pos[0] - from_pos[0], to_pos[1] - from_pos[1])
         if actual_delta != expected_delta:
-            errors.append(f"Move {direction.name} doesn't match delta {actual_delta}, expected {expected_delta}")
+            errors.append(
+                f"Move {cardinal_name(direction)} from {from_pos} to {to_pos} has delta {actual_delta}, "
+                f"but {cardinal_name(direction)} should have delta {expected_delta} (row_change, col_change)"
+            )
     
     # 3. Verify to_pos is walkable (not a wall)
     if 0 <= to_pos[0] < len(grid) and 0 <= to_pos[1] < len(grid[0]):
@@ -256,7 +339,18 @@ def verify_maze_step(
     # 5. Verify turn type
     expected_turn = get_expected_turn_type(prev_direction, direction)
     if claimed_turn is not None and claimed_turn != expected_turn:
-        errors.append(f"Turn type {claimed_turn} should be {expected_turn} (prev={prev_direction.name}, curr={direction.name})")
+        prev_card = cardinal_name(prev_direction)
+        curr_card = cardinal_name(direction)
+        if expected_turn == 'RIGHT_TURN':
+            clock_desc = "clockwise (RIGHT turn)"
+        elif expected_turn == 'LEFT_TURN':
+            clock_desc = "counterclockwise (LEFT turn)"
+        else:
+            clock_desc = "no turn (STRAIGHT)"
+        errors.append(
+            f"Turn type {claimed_turn} should be {expected_turn}. "
+            f"Going from {prev_card} to {curr_card} is a {clock_desc} rotation."
+        )
     
     # 6. Calculate expected counts after this step
     new_right = expected_right_count
@@ -272,11 +366,11 @@ def verify_maze_step(
     
     # 7. Verify running counts
     if claimed_right is not None and claimed_right != new_right:
-        errors.append(f"Right count {claimed_right} should be {new_right}")
+        errors.append(f"Right turn count {claimed_right} should be {new_right}")
     if claimed_left is not None and claimed_left != new_left:
-        errors.append(f"Left count {claimed_left} should be {new_left}")
+        errors.append(f"Left turn count {claimed_left} should be {new_left}")
     if claimed_total is not None and claimed_total != new_total:
-        errors.append(f"Total count {claimed_total} should be {new_total}")
+        errors.append(f"Total turn count {claimed_total} should be {new_total}")
     
     # Update state for next step
     state['new_pos'] = to_pos
@@ -321,7 +415,12 @@ def format_maze_feedback(errors: List[str], step_num: int) -> str:
     feedback = f"\n\n[VERIFIER FEEDBACK for Step {step_num}:\n"
     for err in errors:
         feedback += f"  ✗ {err}\n"
-    feedback += "Please correct this step and continue.]\n\n"
+    feedback += (
+        "IMPORTANT: Clockwise on a compass is NORTH→EAST→SOUTH→WEST→NORTH. "
+        "A RIGHT turn = 90° clockwise; a LEFT turn = 90° counterclockwise. "
+        "For example: SOUTH→WEST is RIGHT (clockwise), SOUTH→EAST is LEFT (counterclockwise). "
+        "Please correct this step and continue.]\n\n"
+    )
     return feedback
 
 
@@ -333,7 +432,13 @@ def format_locate_feedback(errors: List[str]) -> str:
     feedback = "\n\n[VERIFIER FEEDBACK for LOCATE section:\n"
     for err in errors:
         feedback += f"  ✗ {err}\n"
-    feedback += "Please correct the start/exit positions and continue.]\n\n"
+    feedback += (
+        "IMPORTANT: Coordinates are 0-indexed (row 0, col 0 is the top-left corner). "
+        "Do NOT use 1-indexed coordinates. "
+        "For example, if S is in the first row and first open column, "
+        "that is (0, 1) not (1, 1) or (1, 2).\n"
+        "Please correct the start/exit positions and continue.]\n\n"
+    )
     return feedback
 
 

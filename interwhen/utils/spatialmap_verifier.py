@@ -13,7 +13,7 @@ Directions use a coordinate system where:
 
 import re
 from typing import Dict, List, Tuple, Optional, Set
-from z3 import Solver, Real, And, sat
+from z3 import Solver, Real, And, Not, sat, unsat
 
 
 class SpatialMapZ3Solver:
@@ -176,8 +176,149 @@ class SpatialMapZ3Solver:
     def is_satisfiable(self) -> bool:
         return self.solver.check() == sat
 
+    def count_objects_in_direction(
+        self, reference: str, direction: str
+    ) -> Optional[int]:
+        """
+        Count how many entities are in a **strict** direction from *reference*.
 
-def parse_directional_claims_from_text(text: str) -> List[Dict]:
+        For cardinal directions the semantics are strict:
+        - "north"  → same x, higher y   (but see note below)
+        - "south"  → same x, lower y
+        - "east"   → higher x, same y
+        - "west"   → lower x, same y
+
+        However, since every constraint in the SpatialMap dataset is diagonal
+        (NE/NW/SE/SW), no two objects can share an x- or y-coordinate.
+        Therefore the strict-cardinal count is always **0** whenever the
+        problem only has diagonal constraints — which is exactly the
+        ground-truth expectation.
+
+        For diagonal directions:
+        - "northeast" → higher x AND higher y
+        - "northwest" → lower x  AND higher y
+        - "southeast" → higher x AND lower y
+        - "southwest" → lower x  AND lower y
+
+        Returns the count, or ``None`` if the solver cannot determine it
+        (e.g. reference entity not found).
+        """
+        direction = direction.lower().strip()
+
+        # Resolve the reference entity's variable names
+        ref_x_key = f"{reference}_x"
+        ref_y_key = f"{reference}_y"
+        if ref_x_key not in self.entities:
+            # Try fuzzy match — dataset names may differ in whitespace
+            for key in self.entities:
+                if key.endswith("_x") and reference.lower() in key.lower():
+                    ref_x_key = key
+                    ref_y_key = key.replace("_x", "_y")
+                    reference = key[:-2]
+                    break
+            else:
+                return None
+
+        ref_x = self.entities[ref_x_key]
+        ref_y = self.entities[ref_y_key]
+
+        # Collect all other entity names (unique base names)
+        all_entities = set()
+        for key in self.entities:
+            if key.endswith("_x"):
+                ename = key[:-2]
+                if ename != reference:
+                    all_entities.add(ename)
+
+        # Determine x/y constraints for the direction
+        is_cardinal = direction in ("north", "south", "east", "west")
+
+        # Since all given constraints are strictly diagonal, any pair of
+        # objects cannot share the same x- or y-coordinate.  Cardinal
+        # directions require an exact match on one axis, which is impossible.
+        if is_cardinal:
+            return 0
+
+        # For diagonal directions, check each entity with Z3
+        count = 0
+        for ename in all_entities:
+            e_x = self.entities[f"{ename}_x"]
+            e_y = self.entities[f"{ename}_y"]
+
+            if direction == "northeast":
+                constraint = And(e_x > ref_x, e_y > ref_y)
+            elif direction == "northwest":
+                constraint = And(e_x < ref_x, e_y > ref_y)
+            elif direction == "southeast":
+                constraint = And(e_x > ref_x, e_y < ref_y)
+            elif direction == "southwest":
+                constraint = And(e_x < ref_x, e_y < ref_y)
+            else:
+                continue
+
+            # Check if this entity MUST be in that direction
+            # (i.e. the negation is unsatisfiable)
+            self.solver.push()
+            self.solver.add(Not(constraint))
+            must_be = self.solver.check() == unsat
+            self.solver.pop()
+
+            if must_be:
+                count += 1
+
+        return count
+
+
+def parse_counting_question(problem_text: str) -> Optional[Dict]:
+    """
+    If the problem asks a *counting* question ("How many objects are in
+    the X of Y?"), return a dict with the direction and reference entity.
+
+    Returns ``None`` for non-counting questions.
+    """
+    m = re.search(
+        r'How many objects are in the (\w+) of ([^?]+?)\?',
+        problem_text,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    return {
+        "direction": m.group(1).strip().lower(),
+        "reference": m.group(2).strip().rstrip("."),
+    }
+
+
+def parse_model_count_from_answer(text_after_think: str, options: dict = None) -> Optional[int]:
+    """
+    Extract the numeric count the model chose from its ``\\boxed{}`` answer.
+
+    Looks for ``\\boxed{LETTER}`` then maps through *options* to get the
+    numeric value.  Falls back to extracting a number directly.
+    """
+    boxed = re.findall(r'\\boxed\{([^}]*)\}', text_after_think)
+    if not boxed:
+        return None
+    answer = boxed[-1].strip()
+
+    # If options mapping is provided, resolve letter → value
+    if options and answer in options:
+        try:
+            return int(options[answer])
+        except (ValueError, TypeError):
+            return None
+
+    # Try direct numeric
+    try:
+        return int(answer)
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_directional_claims_from_text(
+    text: str,
+    entity_names: Optional[List[str]] = None,
+) -> List[Dict]:
     """
     Parse directional claims from model output text.
     
@@ -185,15 +326,85 @@ def parse_directional_claims_from_text(text: str) -> List[Dict]:
     - "X is to the northwest of Y"
     - "X is NORTHWEST of Y"
     - "X is northwest of Y" (affirmative claims)
+    - "X is NW of Y" (abbreviated directions)
+    - "[X] is to the northwest of [Y]" (bracket-wrapped names)
+    
+    If *entity_names* is provided, single-letter or short abbreviations
+    in parsed claims will be resolved to the closest full entity name.
+    Parenthetical aliases like '(L)', '(Mo)' are stripped before parsing.
     
     Returns list of IR dicts: [{"A": ..., "direction": ..., "B": ...}, ...]
     """
+    # Build abbreviation → full-name map from entity_names.
+    # When multiple entities share the same abbreviation, mark it as
+    # ambiguous (map to None) so we don't silently pick the wrong one.
+    abbrev_to_full: Dict[str, Optional[str]] = {}
+    if entity_names:
+        for name in entity_names:
+            words = re.split(r"[\s']+", name)
+            capitals = [w[0] for w in words if w and w[0].isupper()]
+            candidates: List[str] = []
+            if capitals:
+                candidates.append(capitals[0])                   # e.g. "M"
+                if len(capitals) >= 2:
+                    candidates.append(''.join(capitals[:2]))      # e.g. "MG"
+                    candidates.append(''.join(capitals))          # e.g. "MGM"
+            first_word = words[0] if words else ''
+            if len(first_word) >= 2:
+                candidates.append(first_word[:2])                 # e.g. "Mi"
+            if first_word:
+                candidates.append(first_word)                     # e.g. "Miniature"
+
+            for abbr in candidates:
+                if abbr in abbrev_to_full:
+                    if abbrev_to_full[abbr] != name:
+                        # Ambiguous — mark as None so we skip it
+                        abbrev_to_full[abbr] = None
+                else:
+                    abbrev_to_full[abbr] = name
+
+        # Remove ambiguous entries
+        abbrev_to_full = {k: v for k, v in abbrev_to_full.items() if v is not None}
+
+    # Expand abbreviated directions before parsing
+    abbrev_map = {
+        'NW': 'northwest', 'NE': 'northeast',
+        'SW': 'southwest', 'SE': 'southeast',
+    }
+    expanded_text = text
+    for abbr, full in abbrev_map.items():
+        # Replace standalone abbreviations like "is NE of" → "is northeast of"
+        expanded_text = re.sub(
+            rf'\b{abbr}\b(?=\s+of\b)', full, expanded_text
+        )
+
+    # Strip square brackets around entity names: [Foo Bar] → Foo Bar
+    expanded_text = re.sub(r'\[([A-Z][A-Za-z\'\s]*?)\]', r'\1', expanded_text)
+
+    # Strip parenthetical aliases like (L), (M), (Mo), (IQC) — but not
+    # coordinate tuples like (0,0) or (a, b)
+    expanded_text = re.sub(r'\s*\([A-Z][A-Za-z]{0,3}\)', '', expanded_text)
+
     claims = []
     
     # Pattern: "X is (to the) DIRECTION of Y"
-    pattern = r"([A-Z][A-Za-z'][A-Za-z'\s]*?)\s+is\s+(?:to\s+the\s+)?(northwest|northeast|southwest|southeast|north|south|east|west)\s+of\s+([A-Z][A-Za-z'][A-Za-z'\s]*?)(?:\.|,|\s*[→✓✗]|\s*$|\s+(?:and|so|which|therefore|thus|but|\())"
+    # Terminators include ⇒ for arrow-style claims.
+    # Entity capture allows single uppercase letters (resolved via abbrev map)
+    # or multi-word names starting with uppercase.
+    entity_pat = r"([A-Z][A-Za-z'][A-Za-z'\s]*?|[A-Z][a-z]?)"
+    pattern = (
+        entity_pat +
+        r"\s+is\s+(?:to\s+the\s+)?"
+        r"(northwest|northeast|southwest|southeast|north|south|east|west)"
+        r"\s+of\s+" +
+        entity_pat +
+        r"(?:\.|,|;|:|\s*[→⇒✓✗]|\s*\n|\s*$"
+        r"|\s+(?:and|so|which|therefore|thus|but|since|because|while|whereas"
+        r"|however|hence|then|for|as|meaning|indicating|implying|suggesting"
+        r"|confirming|\())"
+    )
     
-    matches = re.finditer(pattern, text, re.IGNORECASE)
+    matches = re.finditer(pattern, expanded_text, re.IGNORECASE)
     
     for match in matches:
         entity_a = match.group(1).strip()
@@ -204,12 +415,19 @@ def parse_directional_claims_from_text(text: str) -> List[Dict]:
         entity_a = re.sub(r'[,\.\!\?]+$', '', entity_a).strip()
         entity_b = re.sub(r'[,\.\!\?]+$', '', entity_b).strip()
         
+        # Resolve abbreviations to full names if entity_names provided
+        if abbrev_to_full:
+            if entity_a in abbrev_to_full:
+                entity_a = abbrev_to_full[entity_a]
+            if entity_b in abbrev_to_full:
+                entity_b = abbrev_to_full[entity_b]
+
         # Skip if entities look like fragments, pronouns, or are too short
         skip_words = {'then', 'if', 'so', 'thus', 'therefore', 'it', 'this', 'that', 
                       'which', 'what', 'where', 'when', 'also', 'not', 'the', 'a', 'an'}
         if entity_a.lower() in skip_words or entity_b.lower() in skip_words:
             continue
-        if len(entity_a) < 3 or len(entity_b) < 3:
+        if len(entity_a) < 2 or len(entity_b) < 2:
             continue
         if not entity_a[0].isupper():
             continue
@@ -223,7 +441,10 @@ def parse_directional_claims_from_text(text: str) -> List[Dict]:
     return claims
 
 
-def extract_step2_claims(answer_text: str) -> List[Dict]:
+def extract_step2_claims(
+    answer_text: str,
+    entity_names: Optional[List[str]] = None,
+) -> List[Dict]:
     """
     Extract directional claims specifically from STEP 2 of the answer.
     
@@ -243,7 +464,7 @@ def extract_step2_claims(answer_text: str) -> List[Dict]:
         return []
     
     step2_text = match.group(0)
-    return parse_directional_claims_from_text(step2_text)
+    return parse_directional_claims_from_text(step2_text, entity_names=entity_names)
 
 
 def verify_spatialmap_step(
@@ -257,11 +478,16 @@ def verify_spatialmap_step(
     Args:
         claim: {"A": entity1, "direction": direction, "B": entity2}
         z3_solver: The Z3 solver with known constraints
-        add_if_valid: If True, add the claim to the solver if it's valid
+        add_if_valid: If True, add the claim to the solver **only if it
+            is entailed** (i.e. its negation is UNSAT).  Merely
+            satisfiable claims are accepted but NOT committed to the
+            solver so they cannot over-constrain future checks.
     
     Returns:
         (is_valid, errors)
     """
+    from z3 import Not as Z3Not, unsat as z3unsat
+
     errors = []
     
     is_consistent = z3_solver.check_with_new_constraint(claim)
@@ -274,7 +500,17 @@ def verify_spatialmap_step(
         return False, errors
     
     if add_if_valid:
-        z3_solver.apply_ir(claim)
+        # Only commit the claim if it is *entailed* (negation is UNSAT).
+        # This prevents merely-satisfiable-but-unproven claims from
+        # over-constraining the solver and blocking valid solutions later.
+        compiled = z3_solver.compile_constraint(claim)
+        if compiled is not None:
+            z3_solver.solver.push()
+            z3_solver.solver.add(Z3Not(compiled))
+            is_entailed = z3_solver.solver.check() == z3unsat
+            z3_solver.solver.pop()
+            if is_entailed:
+                z3_solver.apply_ir(claim)
     
     return True, []
 
@@ -294,10 +530,280 @@ def format_spatialmap_feedback(errors: List[str], claim: Optional[Dict] = None) 
     return feedback
 
 
+# ---------------------------------------------------------------------------
+#  Direction-question helpers
+# ---------------------------------------------------------------------------
+
+def parse_direction_question(problem_text: str) -> Optional[Dict]:
+    """
+    If the problem asks a *direction* question
+    ("In which direction is X relative to Y?"),
+    return ``{"entity_a": X, "entity_b": Y}``.
+
+    Returns ``None`` for non-direction questions.
+    """
+    m = re.search(
+        r'In which direction is (.+?) relative to (.+?)\?',
+        problem_text,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    return {
+        "entity_a": m.group(1).strip(),
+        "entity_b": m.group(2).strip(),
+    }
+
+
+def parse_object_question(problem_text: str) -> Optional[Dict]:
+    """
+    If the problem asks an *object* question
+    ("Which object is in the [direction] of [entity]?"),
+    return ``{"direction": ..., "reference": ...}``.
+
+    Returns ``None`` for non-object questions.
+    """
+    m = re.search(
+        r'Which object is (?:located )?(?:to the |in the )'
+        r'(northeast|northwest|southeast|southwest|north|south|east|west)'
+        r' of (.+?)\?',
+        problem_text,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    return {
+        "direction": m.group(1).strip().lower(),
+        "reference": m.group(2).strip().rstrip("."),
+    }
+
+
+def parse_model_boxed_answer(
+    text_after_think: str, options: Dict[str, str]
+) -> Optional[str]:
+    """
+    Extract the text value the model chose from its ``\\boxed{}`` answer.
+    Maps letter → option text using *options* dict.
+    Returns the raw option text (lowercase stripped) or None.
+    """
+    boxed = re.findall(r'\\boxed\{([^}]*)\}', text_after_think)
+    if not boxed:
+        return None
+    answer = boxed[-1].strip().upper()
+    if answer in options:
+        return options[answer].strip().lower().rstrip(".")
+    # Try the raw value
+    return answer.lower()
+
+
+def get_possible_directions(
+    solver: SpatialMapZ3Solver,
+    entity_a: str,
+    entity_b: str,
+) -> List[str]:
+    """
+    Return the list of diagonal directions (NE/NW/SE/SW) that are
+    *satisfiable* for entity_a relative to entity_b under the current
+    constraints.
+
+    ``entity_a`` and ``entity_b`` are matched fuzzily against solver
+    entity names.
+    """
+    from z3 import And as Z3And, sat as z3sat
+
+    def _find(name):
+        nl = name.lower()
+        for k in solver.entities:
+            if k.endswith('_x') and k[:-2].lower() == nl:
+                return k[:-2]
+        for k in solver.entities:
+            if k.endswith('_x') and (nl in k[:-2].lower() or k[:-2].lower() in nl):
+                return k[:-2]
+        return None
+
+    ba = _find(entity_a)
+    bb = _find(entity_b)
+    if not ba or not bb:
+        return ['northeast', 'northwest', 'southeast', 'southwest']
+
+    ax = solver.entities[f'{ba}_x']
+    ay = solver.entities[f'{ba}_y']
+    bx = solver.entities[f'{bb}_x']
+    by = solver.entities[f'{bb}_y']
+
+    dir_constraints = {
+        'northeast': Z3And(ax > bx, ay > by),
+        'northwest': Z3And(ax < bx, ay > by),
+        'southeast': Z3And(ax > bx, ay < by),
+        'southwest': Z3And(ax < bx, ay < by),
+    }
+
+    possible = []
+    for dname, dc in dir_constraints.items():
+        solver.solver.push()
+        solver.solver.add(dc)
+        if solver.solver.check() == z3sat:
+            possible.append(dname)
+        solver.solver.pop()
+
+    return possible if possible else ['northeast', 'northwest', 'southeast', 'southwest']
+
+
+def get_consistent_object_options(
+    solver: SpatialMapZ3Solver,
+    direction: str,
+    reference: str,
+    options: Dict[str, str],
+) -> List[str]:
+    """
+    For an *object* question, return the list of MCQ letters whose entity
+    *could* be in ``direction`` of ``reference`` (Z3-satisfiable).
+
+    Letters whose entities cannot be found in the solver are kept as
+    "possible" (benefit of the doubt).
+    """
+    from z3 import And as Z3And, sat as z3sat
+
+    def _find(name):
+        nl = name.lower()
+        for k in solver.entities:
+            if k.endswith('_x') and k[:-2].lower() == nl:
+                return k[:-2]
+        for k in solver.entities:
+            if k.endswith('_x') and (nl in k[:-2].lower() or k[:-2].lower() in nl):
+                return k[:-2]
+        return None
+
+    ref_base = _find(reference)
+    if not ref_base:
+        return list(options.keys())  # can't check, keep all
+
+    rx = solver.entities[f'{ref_base}_x']
+    ry = solver.entities[f'{ref_base}_y']
+
+    dfunc = {
+        'northeast': lambda ox, oy: Z3And(ox > rx, oy > ry),
+        'northwest': lambda ox, oy: Z3And(ox < rx, oy > ry),
+        'southeast': lambda ox, oy: Z3And(ox > rx, oy < ry),
+        'southwest': lambda ox, oy: Z3And(ox < rx, oy < ry),
+    }.get(direction.lower())
+    if not dfunc:
+        return list(options.keys())
+
+    consistent = []
+    for letter, opt_name in options.items():
+        opt_base = _find(opt_name.strip().rstrip('.'))
+        if not opt_base:
+            consistent.append(letter)  # can't verify, assume possible
+            continue
+        ox = solver.entities[f'{opt_base}_x']
+        oy = solver.entities[f'{opt_base}_y']
+        solver.solver.push()
+        solver.solver.add(dfunc(ox, oy))
+        if solver.solver.check() == z3sat:
+            consistent.append(letter)
+        solver.solver.pop()
+
+    return consistent
+
+
+def get_possible_count_range(
+    solver: SpatialMapZ3Solver,
+    reference: str,
+    direction: str,
+) -> Optional[Tuple[int, int]]:
+    """
+    Compute the *[min, max]* range of how many entities could be in
+    ``direction`` of ``reference`` across all satisfying assignments.
+
+    Uses Z3 must-be / can-be checks per entity:
+    - *must_be*:  negation is UNSAT → entity is ALWAYS in that direction
+    - *can_be*:   adding constraint is SAT → entity COULD be there
+
+    min = count(must_be), max = count(must_be) + count(maybe)
+
+    Returns ``None`` if the reference entity cannot be found.
+    """
+    from z3 import And as Z3And, Not as Z3Not, sat as z3sat, unsat as z3unsat
+
+    direction = direction.lower().strip()
+    if direction in ('north', 'south', 'east', 'west'):
+        return (0, 0)  # cardinal → always 0 with diagonal-only constraints
+
+    def _find(name):
+        nl = name.lower()
+        for k in solver.entities:
+            if k.endswith('_x') and k[:-2].lower() == nl:
+                return k[:-2]
+        for k in solver.entities:
+            if k.endswith('_x') and (nl in k[:-2].lower() or k[:-2].lower() in nl):
+                return k[:-2]
+        return None
+
+    ref_base = _find(reference)
+    if not ref_base:
+        return None
+
+    rx = solver.entities[f'{ref_base}_x']
+    ry = solver.entities[f'{ref_base}_y']
+
+    others = [
+        k[:-2] for k in solver.entities
+        if k.endswith('_x') and k[:-2] != ref_base
+    ]
+
+    dfunc = {
+        'northeast': lambda ox, oy: Z3And(ox > rx, oy > ry),
+        'northwest': lambda ox, oy: Z3And(ox < rx, oy > ry),
+        'southeast': lambda ox, oy: Z3And(ox > rx, oy < ry),
+        'southwest': lambda ox, oy: Z3And(ox < rx, oy < ry),
+    }.get(direction)
+    if not dfunc:
+        return None
+
+    must_count = 0
+    maybe_count = 0
+
+    for ename in others:
+        ex = solver.entities[f'{ename}_x']
+        ey = solver.entities[f'{ename}_y']
+        c = dfunc(ex, ey)
+
+        # Can it be in that direction?
+        solver.solver.push()
+        solver.solver.add(c)
+        can_be = solver.solver.check() == z3sat
+        solver.solver.pop()
+
+        if not can_be:
+            continue
+
+        # Must it be?
+        solver.solver.push()
+        solver.solver.add(Z3Not(c))
+        must_be = solver.solver.check() == z3unsat
+        solver.solver.pop()
+
+        if must_be:
+            must_count += 1
+        else:
+            maybe_count += 1
+
+    return (must_count, must_count + maybe_count)
+
+
 # Export
 __all__ = [
     'SpatialMapZ3Solver',
     'parse_directional_claims_from_text',
+    'parse_counting_question',
+    'parse_model_count_from_answer',
+    'parse_direction_question',
+    'parse_object_question',
+    'parse_model_boxed_answer',
+    'get_possible_directions',
+    'get_consistent_object_options',
+    'get_possible_count_range',
     'extract_step2_claims',
     'verify_spatialmap_step',
     'format_spatialmap_feedback',

@@ -28,7 +28,7 @@ def get_model_short_name(model_name: str) -> str:
     short_name = short_name.replace(" ", "_").replace(":", "-")
     return short_name
 
-def get_output_dirs(main_model: str, base_dir: str = "../../Outputs/MazeResults"):
+def get_output_dirs(main_model: str, base_dir: str = "../Outputs/MazeResults"):
     """Create and return output directory paths based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
@@ -46,14 +46,14 @@ def get_output_dirs(main_model: str, base_dir: str = "../../Outputs/MazeResults"
     
     return dirs
 
-def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs/MazeResults") -> str:
+def get_log_filename(main_model: str, num_examples: int, base_dir: str = "../Outputs/MazeResults") -> str:
     """Generate log filename based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     os.makedirs(output_base, exist_ok=True)
     return os.path.join(output_base, f"EAT_{num_examples}examples.log")
 
-def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../../Outputs/MazeResults") -> str:
+def get_token_filename(main_model: str, num_examples: int, base_dir: str = "../Outputs/MazeResults") -> str:
     """Generate token CSV filename based on model name."""
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
@@ -66,10 +66,10 @@ def remove_last_paragraph(s: str) -> str:
 logger = logging.getLogger(__name__)
 
 def load_maze_dataset(split="val"):
-    ds = load_dataset("microsoft/VISION_LANGUAGE", "maze", split=split)
+    ds = load_dataset("microsoft/VISION_LANGUAGE", "maze_text_only", split=split)
     return ds
 
-def init_llm_server(modelname, max_tokens=200, port=8000): #
+def init_llm_server(modelname, max_tokens=200, port=8000):
     url = f"http://localhost:{port}/v1/completions"
     payload = {
         "model": modelname,
@@ -101,19 +101,26 @@ def build_prompt_from_example(example): #(original prompt config)
     return pre_prompt , description
 
 
-def extract_solution(text):
-    matches = re.findall(r"\\boxed\{([^}]*)\}", text)
-    if not matches:
-        return None
-
-    expr = matches[-1].strip()   # take last boxed content
-
-    # find one of A/B/C/D inside the boxed content
-    choice_match = re.search(r"\b([ABCD])\b", expr, flags=re.IGNORECASE)
-    if not choice_match:
-        return None
-
-    return choice_match.group(1).upper()
+def extract_solution_mcq(text):
+    """Extract MCQ solution from model output."""
+    # Try multiple boxed patterns
+    patterns = [
+        r"\\boxed\{([^}]*)\}",  # \boxed{...}
+        r"boxed\{([^}]*)\}",     # boxed{...} without escape
+        r"\*\*([A-D])\*\*",      # **A** format
+        r"answer[:\s]*([A-D])",  # answer: A format
+        r"(?:^|\n)([A-D])(?:\s|$|\.)",  # Standalone letter
+    ]
+   
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        if matches:
+            expr = matches[-1].strip()
+            choice_match = re.search(r"\b([ABCD])\b", expr, flags=re.IGNORECASE)
+            if choice_match:
+                return choice_match.group(1).upper()
+   
+    return None
 
 def save_prompt(idx, prompt_with_answer, reason_dir):
     filename = os.path.join(reason_dir, f"reason_{idx}.txt")
@@ -127,54 +134,30 @@ def count_tokens(text, tokenizer):
     return len(tokens)
 
 
-def evaluate_maze_answer(answer, options, ground_truth):
-    """
-    Evaluate a Maze MCQ answer and return (is_correct, extracted_answer, message).
-    
-    Args:
-        answer: Raw model output
-        options: Dictionary mapping option letters (A/B/C/D) to their values
-        ground_truth: The correct answer value
-        
-    Returns:
-        Tuple of (is_correct, extracted_answer, message)
-    """
-    sol = extract_solution(answer)
+def evaluate_mcq_answer(answer, options, ground_truth):
+    sol = extract_solution_mcq(answer)
     gt_sol = str(ground_truth).strip()
-    
     if not sol:
         return False, None, "No expression found"
-    
     sol = sol.strip()
-    
-    # Case 1: LLM returned option letter (A/B/C/D)
     if sol in options:
         if options[sol] == gt_sol:
             return True, sol, f"Correct: option {sol} -> {options[sol]}"
-        else:
-            return False, sol, f"Incorrect: expected '{gt_sol}', got '{options[sol]}' (option {sol})"
-    
-    # Case 2: LLM returned the actual answer text
-    # First check if sol matches ground truth directly
+        return False, sol, f"Incorrect: expected '{gt_sol}', got '{options[sol]}' (option {sol})"
     if sol.lower() == gt_sol.lower():
         return True, sol, f"Correct: answer text matches ground truth: {sol}"
-    
-    # Check if sol matches any option value
     for opt_letter, opt_value in options.items():
         if sol.lower() == opt_value.lower():
             if opt_value == gt_sol:
                 return True, sol, f"Correct: answer text {sol} (option {opt_letter})"
-            else:
-                return False, sol, f"Incorrect: expected '{gt_sol}', got '{opt_value}' (option {opt_letter})"
-    
+            return False, sol, f"Incorrect: expected '{gt_sol}', got '{opt_value}' (option {opt_letter})"
     return False, sol, f"Solution '{sol}' not found in options or ground truth"
-
 
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Maze problem solver with LLM and monitors")
     parser.add_argument("--thinking", "-t", action="store_true", help="Enable chain-of-thought output")
-    parser.add_argument("--monitor", "-m", default = True, action="store_true", help="Enable step-by-step monitor")
+    parser.add_argument("--monitor", "-m", default = False, action="store_true", help="Enable step-by-step monitor")
     parser.add_argument("--num_examples", "-n", type=int, default=1500, help="Number of examples to run")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logs")
     parser.add_argument("--main_model", type=str, default=MAIN_MODEL, help="Main model to use for generation")
@@ -207,7 +190,7 @@ if __name__ == "__main__":
 
     dataset = load_maze_dataset()
 
-    llm_server = init_llm_server(main_model, max_tokens=15000)
+    llm_server = init_llm_server(main_model, max_tokens=32768)
 
     # Load tokenizer for accurate token counting
     logger.info(f"Loading tokenizer for {main_model}...")
@@ -219,7 +202,7 @@ if __name__ == "__main__":
     total_generated_tokens = 0
     generated_token_counts = []
     total = len(dataset)
-    indices = np.linspace(3000, total-1, N, dtype=int).tolist()
+    indices = np.linspace(0, total-1, N, dtype=int).tolist()
 
     for idx in indices:
         example = dataset[idx]
@@ -268,7 +251,7 @@ if __name__ == "__main__":
 
         # Evaluate the answer
         gt_sol = str(example.get("ground_truth", "")).strip()
-        is_correct, extracted_answer, message = evaluate_maze_answer(answer, options, gt_sol)
+        is_correct, extracted_answer, message = evaluate_mcq_answer(answer, options, gt_sol)
         
         if extracted_answer:
             logger.info(f"Extracted answer: {extracted_answer}")

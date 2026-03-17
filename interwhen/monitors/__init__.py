@@ -2,4 +2,7 @@ from .textReplacement import SimpleTextReplaceMonitor
 from .k_stable import KstableAnswerMCQMonitor, KstableAnswerGame24Monitor
 from .stepVerifier import StepVerifierGame24Monitor, StepVerifierMazeMonitor, StepVerifierSpatialMapMonitor
 from .earlyStopping import EATMonitor, DEERMonitor
+from .thinkingPhaseVerifierGame24 import ThinkingPhaseStepVerifierGame24Monitor
+from .thinkingPhaseVerifierMaze import ThinkingPhaseStepVerifierMazeMonitor
+from .thinkingPhaseVerifierSpatialMap import ThinkingPhaseStepVerifierSpatialMapMonitor
 from .zebralogic_monitor import ZebraLogicMonitor

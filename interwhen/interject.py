@@ -35,7 +35,11 @@ async def stream_completion(prompt, prev_text = "", llm_server=None, monitors=[]
                         break
                     else:
                         # Obtain the current token (text chunk)
-                        chunk = json.loads(data)["choices"][0]["text"]
+                        try:
+                            chunk = json.loads(data)["choices"][0]["text"]
+                        except (json.JSONDecodeError, KeyError, IndexError) as e:
+                            logger.debug(f"Skipping malformed SSE data: {data!r} ({e})")
+                            continue
                         # If any event is already set, break immediately (we don't want more chunks)
                         if stop_event.is_set():
                             logger.info(f'\n[Early stop already triggered, ignoring chunk: {chunk}]')
@@ -71,6 +75,8 @@ async def stream_completion(prompt, prev_text = "", llm_server=None, monitors=[]
         corrected_text = await monitors[0].fix(generated_text, stop_info)
         if stop_info["feedback"] == "\nthe answer is \\boxed{no solution}":
             return corrected_text # No solution found, return no solution ie soundness is 100% is it doesnt pass the verifer
+        if stop_info.get("phase") == "final_answer_correct":
+            return corrected_text  # Expression verified correct, stop generation
         return await stream_completion(prompt, prev_text=corrected_text, llm_server=llm_server, monitors=monitors, add_delay=add_delay, num_calls_index=num_calls_index+1, termination_requires_validation=termination_requires_validation, async_execution=async_execution)
 
     return generated_text

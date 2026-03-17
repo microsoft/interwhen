@@ -1,14 +1,6 @@
-"""
-Game of 24 experiment with thinking-phase step verification.
-
-Uses ThinkingPhaseStepVerifierGame24Monitor which:
-  - Verifies the model's intermediate expressions during <think> via side-streams
-  - Injects expression extraction after </think>
-  - Verifies the final \\boxed{} expression for correctness
-"""
-
 import argparse
 import asyncio
+import json
 import logging
 import os
 import re
@@ -18,7 +10,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 
 from interwhen import stream_completion
-from interwhen.monitors import ThinkingPhaseStepVerifierGame24Monitor
+from interwhen.monitors import StepVerifierGame24Monitor
 
 # ============== MODEL CONFIGURATION ==============
 MAIN_MODEL = "Qwen/QwQ-32B"
@@ -41,7 +33,7 @@ def get_model_short_name(model_name: str) -> str:
 def get_output_dirs(main_model: str, base_dir: str = None):
     """Create and return output directory paths based on model name."""
     if base_dir is None:
-        base_dir = os.path.join(_OUTPUT_ROOT, "Outputs_TTS", "Gameof24results")
+        base_dir = os.path.join(_OUTPUT_ROOT, "Outputs_TTS", "Gameof24results", "metaPrompt")
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     
@@ -51,6 +43,7 @@ def get_output_dirs(main_model: str, base_dir: str = None):
         "csv_saved": os.path.join(output_base, "csv_saved"),
     }
     
+    # Create all directories
     for dir_path in dirs.values():
         os.makedirs(dir_path, exist_ok=True)
     
@@ -59,7 +52,7 @@ def get_output_dirs(main_model: str, base_dir: str = None):
 def get_log_filename(main_model: str, num_examples: int, base_dir: str = None) -> str:
     """Generate log filename based on model name."""
     if base_dir is None:
-        base_dir = os.path.join(_OUTPUT_ROOT, "Outputs_TTS", "Gameof24results")
+        base_dir = os.path.join(_OUTPUT_ROOT, "Outputs_TTS", "Gameof24results", "metaPrompt")
     model_short_name = get_model_short_name(main_model)
     output_base = os.path.join(base_dir, model_short_name)
     os.makedirs(output_base, exist_ok=True)
@@ -93,21 +86,148 @@ def init_llm_server(modelname, max_tokens=32768, port=8000):
     return {"url": url, "payload": payload, "headers": headers}
 
 
-def build_prompt(nums):
+def build_meta_prompt_from_example(nums):
+    """Build the system and user prompts for Game of 24 with step verification format."""
     a, b, c, d = nums
-    boxed = r"\boxed{}"
-    base_prompt = f"""
-    You are solving the Game of 24.
     
-    You are given four numbers: {a}, {b}, {c}, {d}
+    system_prompt = r"""You are solving the Game of 24.
+
+GAME RULES:
+- You are given four numbers
+- Use ALL four numbers exactly once
+- Use ONLY the operations: +, -, *, /
+- The final expression must evaluate to exactly 24
+
+OUTPUT FORMAT:
+You must follow this EXACT structured format for your solution:
+
+>Step1
+available numbers: [a, b, c, d]
+suggested operation: a * b = result1
+remaining numbers: [result1, c, d]
+
+>Step2
+available numbers: [result1, c, d]
+suggested operation: result1 + c = result2
+remaining numbers: [result2, d]
+
+>Step3
+available numbers: [result2, d]
+suggested operation: result2 - d = 24
+remaining numbers: [24]
+
+> Final expression: \boxed{expression using original numbers}
+
+IMPORTANT RULES:
+1. Each step MUST show the available numbers at the start
+2. Each step MUST show the suggested operation with its result
+3. Each step MUST show the remaining numbers after the operation
+4. Continue until you reach exactly 24
+5. The final expression inside \boxed{} must use the ORIGINAL numbers
+6. If you receive VERIFIER FEEDBACK, immediately provide a corrected step - do NOT restart your thinking
+
+═══════════════════════════════════════════════════════════════════════════════
+EXAMPLE 1: Numbers [2, 3, 4, 5]
+═══════════════════════════════════════════════════════════════════════════════
+
+### Final Answer
+
+>Step1
+available numbers: [2, 3, 4, 5]
+suggested operation: 5 + 3 = 8
+remaining numbers: [8, 2, 4]
+
+>Step2
+available numbers: [8, 2, 4]
+suggested operation: 8 - 2 = 6
+remaining numbers: [6, 4]
+
+>Step3
+available numbers: [6, 4]
+suggested operation: 6 * 4 = 24
+remaining numbers: [24]
+
+> Final expression: \boxed{(5 + 3 - 2) * 4}
+
+═══════════════════════════════════════════════════════════════════════════════
+EXAMPLE 2: Numbers [1, 5, 5, 5]
+═══════════════════════════════════════════════════════════════════════════════
+
+### Final Answer
+
+>Step1
+available numbers: [1, 5, 5, 5]
+suggested operation: 1 / 5 = 0.2
+remaining numbers: [0.2, 5, 5]
+
+>Step2
+available numbers: [0.2, 5, 5]
+suggested operation: 5 - 0.2 = 4.8
+remaining numbers: [4.8, 5]
+
+>Step3
+available numbers: [4.8, 5]
+suggested operation: 4.8 * 5 = 24
+remaining numbers: [24]
+
+> Final expression: \boxed{(5 - 1/5) * 5}
+
+═══════════════════════════════════════════════════════════════════════════════
+EXAMPLE 3: Handling Verifier Feedback - Numbers [1, 2, 6, 8]
+═══════════════════════════════════════════════════════════════════════════════
+
+### Final Answer
+
+>Step1
+available numbers: [1, 2, 6, 8]
+suggested operation: 8 / 2 = 4
+remaining numbers: [4, 1, 6]
+
+>Step2
+available numbers: [4, 1, 6]
+suggested operation: 4 - 1 = 3
+remaining numbers: [3, 6]
+
+[VERIFIER FEEDBACK for Step 2:
+  ✗ Cannot reach 24 from remaining numbers [3, 6]. This path is a dead end.
+The previous steps are correct. Please provide a corrected Step 2 and continue.]
+
+>Step2
+available numbers: [4, 1, 6]
+suggested operation: 6 - 1 = 5
+remaining numbers: [5, 4]
+
+[VERIFIER FEEDBACK for Step 2:
+  ✗ Cannot reach 24 from remaining numbers [4, 5]. This path is a dead end.
+The previous steps are correct. Please provide a corrected Step 2 and continue.]
+
+>Step2
+available numbers: [4, 1, 6]
+suggested operation: 6 * 1 = 6
+remaining numbers: [6, 4]
+
+>Step3
+available numbers: [6, 4]
+suggested operation: 6 * 4 = 24
+remaining numbers: [24]
+
+> Final expression: \boxed{(8 / 2) * 6 * 1}
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Now solve the following Game of 24 problem using the EXACT same format."""
+
+    user_prompt = f"""
+Numbers: {a}, {b}, {c}, {d}
+
+Find an arithmetic expression using these four numbers exactly once each with +, -, *, / that equals 24.
+
+Use the structured step-by-step format shown in the examples above."""
+
+    # Combine into a single prompt
+    full_prompt = f"{system_prompt}\n\n{user_prompt}"
     
-    Your job is to produce a valid arithmetic expression using:
-    - ALL four numbers exactly once
-    - ONLY +, -, *, /
-    - The expression must evaluate to exactly 24.
-    
-    Please reason step by step, and put your final answer containing only the expression within {boxed}.""".strip()
-    return base_prompt
+    return full_prompt
 
 
 def count_tokens(text: str, tokenizer) -> int:
@@ -118,22 +238,10 @@ def count_tokens(text: str, tokenizer) -> int:
 
 def extract_solution(text):
     
-    # Only search for \boxed{} AFTER </think> to avoid grabbing unverified
-    # expressions from inside the thinking trace.
-    # If model opened <think> but never closed it (hit token limit), there is
-    # no final answer — return None.
-    if '</think>' in text:
-        search_text = text[text.rfind('</think>'):]
-    elif '<think>' in text:
-        # Model started thinking but never finished — no verified answer
-        return None
-    else:
-        search_text = text
-
     # Use a more robust extraction that handles nested braces in \boxed{}
     # Find \boxed{ and then match braces properly
     boxed_pattern = r"\\boxed\{"
-    matches = list(re.finditer(boxed_pattern, search_text))
+    matches = list(re.finditer(boxed_pattern, text))
     if not matches:
         return None
     
@@ -142,18 +250,14 @@ def extract_solution(text):
     start = last_match.end()  # Position right after \boxed{
     brace_count = 1
     end = start
-    while end < len(search_text) and brace_count > 0:
-        if search_text[end] == '{':
+    while end < len(text) and brace_count > 0:
+        if text[end] == '{':
             brace_count += 1
-        elif search_text[end] == '}':
+        elif text[end] == '}':
             brace_count -= 1
         end += 1
     
-    expr = search_text[start:end-1].strip()  # -1 to exclude the closing brace
-
-    # Skip empty \boxed{} (e.g., from verifier feedback "Wrap in \boxed{}.")
-    if not expr:
-        return None
+    expr = text[start:end-1].strip()  # -1 to exclude the closing brace
 
     # 1. Convert \frac{a}{b} to (a/b)
     frac_pattern = r"\\frac\{([^{}]+)\}\{([^{}]+)\}"
@@ -176,9 +280,6 @@ def extract_solution(text):
     # 3. Cleanup (remove LaTeX formatting artifacts)
     expr = expr.replace(r"\,", "").replace(r"\ ", "")
     expr = expr.replace(r"\left", "").replace(r"\right", "")
-
-    # 3b. Strip trailing "= <number>" (e.g., "10 - 8/8 * 1 = 24" -> "10 - 8/8 * 1")
-    expr = re.sub(r'\s*=\s*[\d.]+\s*$', '', expr)
 
     # 4. Handle implicit multiplication (e.g., "(11+1)(1+1)" -> "(11+1)*(1+1)")
     # Insert * between: )( , )number, number(, )(
@@ -224,8 +325,10 @@ def evaluate_game24_answer(answer, nums):
         Tuple of (is_correct, extracted_expression, error_message)
     """
     expr = extract_solution(answer)
+    
     if not expr:
         return False, None, "No expression found"
+    
     if evaluate_expression(expr, expected_nums=nums):
         return True, expr, "Correct solution (evaluates to 24 using exactly the given numbers)"
     else:
@@ -238,17 +341,18 @@ def evaluate_game24_answer(answer, nums):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Game of 24 step-by-step solver with monitors")
-    parser.add_argument("--num_examples", "-n", type=int, default=1362, help="Number of examples to run")
+    parser.add_argument("--monitor", "-m", action="store_true", help="Enable step-by-step monitor")
+    parser.add_argument("--num_examples", "-n", type=int, default=1, help="Number of examples to run")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logs")
-    parser.add_argument("--newline_threshold", type=int, default=20, help="Number of newlines in thinking before forcing step verification")
-    parser.add_argument("--max_corrections", type=int, default=3, help="Maximum number of correction attempts per example")
-    parser.add_argument("--warmup", type=int, default=4, help="Number of \\n to skip before starting side-chain verification")
-    parser.add_argument("--model", type=str, default=MAIN_MODEL, help="Main model to use for generation")
+    parser.add_argument("--model", type=str, default=MAIN_MODEL, help="Model to use for generation")
     parser.add_argument("--port", type=int, default=8000, help="vLLM server port")
+    parser.add_argument("--max_corrections", type=int, default=5,
+                        help="Maximum number of correction attempts per example")
     args = parser.parse_args()
 
     main_model = args.model
 
+    # Setup output directories based on model name
     output_dirs = get_output_dirs(main_model)
     logfile = get_log_filename(main_model, args.num_examples)
     reason_dir = output_dirs["reasoning"]
@@ -259,7 +363,7 @@ if __name__ == "__main__":
         level=log_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[
-            logging.FileHandler(logfile, mode="w"),
+            logging.FileHandler(logfile, mode="w"),  
             logging.StreamHandler()
         ],
         force=True,
@@ -267,112 +371,105 @@ if __name__ == "__main__":
 
     logger.info(f"Main model: {main_model}")
     logger.info(f"Output directory: {output_dirs['base']}")
-    logger.info(f"Newline threshold: {args.newline_threshold}")
-    logger.info(f"Warmup: {args.warmup}")
 
     dataset = load_dataset("nlile/24-game", split="train")
 
     llm_server = init_llm_server(main_model, port=args.port)
 
+    # Load tokenizer for accurate token counting
     logger.info(f"Loading tokenizer for {main_model}...")
     tokenizer = AutoTokenizer.from_pretrained(main_model, trust_remote_code=True)
     logger.info("Tokenizer loaded successfully.")
 
     num_correct = 0
-    num_attempted = 0  # model produced a real answer (not "no solution" and not missing after </think>)
-    num_excluded = 0   # excluded from soundness (no solution or token budget exceeded)
     N = args.num_examples
-    total_generated_tokens = 0
-    generated_token_counts = []
+    total_reasoning_tokens = 0
+    reasoning_token_counts = []
 
+    # total = len(dataset)
     indices = np.linspace(0, len(dataset)-1, N, dtype=int)
 
-    for idx in indices:
+    for idx in indices: #for idx in indices:
         example = dataset[idx]
         nums = example["numbers"]
-        prompt = build_prompt(nums)
-        full_prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
 
-        monitor = ThinkingPhaseStepVerifierGame24Monitor(
-            name="game24_verifier",
-            original_numbers=nums,
-            llm_server=llm_server,
-            prompt=full_prompt,
-            newline_threshold=args.newline_threshold,
-            max_corrections=args.max_corrections,
-            answer_start_token="</think>",
-            warmup_newlines=args.warmup,
-        )
+        prompt = build_meta_prompt_from_example(nums)
+
+        if args.monitor:
+            monitors = (StepVerifierGame24Monitor(
+                name="game24_verifier",
+                answer_start_token="</think>",
+                original_numbers=nums,
+                max_corrections=args.max_corrections,
+            ),)
+        else:
+            monitors = ()
 
         logger.info(f"---- Example {idx+1} ----")
         logger.info(f"Numbers: {nums}")
+
+        full_prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
 
         try:
             answer = asyncio.run(stream_completion(
                 full_prompt,
                 llm_server=llm_server,
-                monitors=(monitor,),
+                monitors=monitors,
                 add_delay=False,
                 termination_requires_validation=False,
                 async_execution=True
             ))
         except Exception as e:
             logger.error(f"Error running example {idx}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
 
         save_prompt(idx, answer, reason_dir)
         logger.info(f"Raw final output:\n{answer}")
 
-        generated_tokens = count_tokens(answer, tokenizer)
-        generated_token_counts.append(generated_tokens)
-        total_generated_tokens += generated_tokens
-        logger.info(f"Generated tokens in this example: {generated_tokens}")
+        reasoning_tokens = count_tokens(answer, tokenizer)
+        reasoning_token_counts.append(reasoning_tokens)
+        total_reasoning_tokens += reasoning_tokens
+        logger.info(f"Generated tokens in this example: {reasoning_tokens}")
 
         is_correct, expr, message = evaluate_game24_answer(answer, nums)
-        # Attempted: model produced a real answer (not "no solution" and not missing after </think>)
-        gave_no_solution = (expr is not None and "no solution" in expr.strip().lower())
-        no_expr_found = (expr is None)
-        attempted = not (gave_no_solution or no_expr_found)
-        if attempted:
-            num_attempted += 1
-        else:
-            num_excluded += 1
-
+        
         if expr:
             logger.info(f"Extracted expression: {expr}")
         logger.info(message)
+        
         if is_correct:
             num_correct += 1
 
-    avg_generated_tokens = total_generated_tokens / N if N > 0 else 0
+    # Calculate final statistics
+    avg_reasoning_tokens = total_reasoning_tokens / N if N > 0 else 0
     accuracy = num_correct / N if N > 0 else 0
-    soundness = num_correct / num_attempted if num_attempted > 0 else 0
-
+    
     print(f"\nFinal Accuracy: {num_correct}/{N} ({accuracy:.2%})")
-    print(f"Soundness: {num_correct}/{num_attempted} ({soundness:.2%})")
-    print(f"Excluded from soundness (no solution / token budget exceeded): {num_excluded}")
-    print(f"Average Generated Tokens: {avg_generated_tokens:.2f}")
-    print(f"Total Generated Tokens: {total_generated_tokens}")
-
+    print(f"Average Reasoning Tokens: {avg_reasoning_tokens:.2f}")
+    print(f"Total Reasoning Tokens: {total_reasoning_tokens}")
+    
+    # Save results to a text file
     results_file = logfile.replace('.log', '_results.txt')
     with open(results_file, 'w') as f:
         f.write(f"Game of 24 Evaluation Results\n")
         f.write(f"{'='*50}\n\n")
         f.write(f"Model: {main_model}\n")
-        f.write(f"Number of Examples: {N}\n\n")
+        f.write(f"Number of Examples: {N}\n")
+        f.write(f"Monitor Enabled: {args.monitor}\n\n")
         f.write(f"Results:\n")
         f.write(f"---------\n")
         f.write(f"Correct: {num_correct}/{N}\n")
-        f.write(f"Accuracy: {accuracy:.2%}\n")
-        f.write(f"Soundness: {num_correct}/{num_attempted} = {soundness:.2%}\n")
-        f.write(f"Excluded from soundness (no solution / token budget exceeded): {num_excluded}\n\n")
-        f.write(f"Generated Token Statistics:\n")
+        f.write(f"Accuracy: {accuracy:.2%}\n\n")
+        f.write(f"Reasoning Token Statistics:\n")
         f.write(f"---------------------------\n")
-        f.write(f"Total Generated Tokens: {total_generated_tokens}\n")
-        f.write(f"Average Generated Tokens: {avg_generated_tokens:.2f}\n")
-        if generated_token_counts:
-            f.write(f"Min Generated Tokens: {min(generated_token_counts)}\n")
-            f.write(f"Max Generated Tokens: {max(generated_token_counts)}\n")
-            f.write(f"Std Dev: {np.std(generated_token_counts):.2f}\n")
+        f.write(f"Total Reasoning Tokens: {total_reasoning_tokens}\n")
+        f.write(f"Average Reasoning Tokens: {avg_reasoning_tokens:.2f}\n")
+        if reasoning_token_counts:
+            f.write(f"Min Reasoning Tokens: {min(reasoning_token_counts)}\n")
+            f.write(f"Max Reasoning Tokens: {max(reasoning_token_counts)}\n")
+            f.write(f"Std Dev: {np.std(reasoning_token_counts):.2f}\n")
+    
     logger.info(f"Results saved to {results_file}")
     print(f"Results saved to {results_file}")
