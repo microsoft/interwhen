@@ -5,3 +5,4 @@ from .earlyStopping import EATMonitor, DEERMonitor
 from .thinkingPhaseVerifierGame24 import ThinkingPhaseStepVerifierGame24Monitor
 from .thinkingPhaseVerifierMaze import ThinkingPhaseStepVerifierMazeMonitor
 from .thinkingPhaseVerifierSpatialMap import ThinkingPhaseStepVerifierSpatialMapMonitor
+from .zebralogic_monitor import ZebraLogicMonitor
