@@ -487,7 +487,7 @@ def verify_spatialmap_step(
     Returns:
         (is_valid, errors)
     """
-    from z3 import Not as Z3Not, sat as z3sat
+    from z3 import Not as Z3Not, unsat as z3unsat
 
     errors = []
     
@@ -508,7 +508,7 @@ def verify_spatialmap_step(
         if compiled is not None:
             z3_solver.solver.push()
             z3_solver.solver.add(Z3Not(compiled))
-            is_entailed = z3_solver.solver.check() != z3sat
+            is_entailed = z3_solver.solver.check() == z3unsat
             z3_solver.solver.pop()
             if is_entailed:
                 z3_solver.apply_ir(claim)
