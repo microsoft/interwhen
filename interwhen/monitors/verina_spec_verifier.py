@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Tuple, Optional, Dict, Any
 import copy
 import httpx
-from interwhen.utils.verina_utils import *
+from interwhen.utils.verina_verifier_utils import *
 from .base import VerifyMonitor
 
 #Paths

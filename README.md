@@ -1,4 +1,24 @@
-# interwhen: Verifiable Reasoning with Language Models
+<h1 align="center">interwhen</h1>
+
+<p align="center">
+   A Generalizable Framework for Verifiable Reasoning with Test-time Monitors
+</p>
+
+<p align="center">
+  <a href="https://arxiv.org/abs/2602.11202"><img src="https://img.shields.io/badge/arXiv-2602.11202-b31b1b?style=flat&logo=arxiv&logoColor=white" alt="Paper"></a>
+  <!-- <a href="https://pypi.org/project/interwhen/"><img src="https://img.shields.io/pypi/v/interwhen?logo=python&logoColor=white&color=3776ab" alt="PyPI"></a> -->
+  <a href="https://github.com/microsoft/interwhen"><img src="https://img.shields.io/github/stars/microsoft/interwhen?style=flat&logo=github&color=181717" alt="GitHub stars"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-green?style=flat" alt="License"></a>
+  <img src="https://img.shields.io/badge/python-3.10%2B-3776ab?style=flat&logo=python&logoColor=white" alt="Python 3.10+">
+</p>
+
+<p align="center">
+  <a href="https://arxiv.org/abs/2602.11202"><b>Paper</b></a> &nbsp;|&nbsp;
+  <a href="#installation"><b>Quick Start</b></a> &nbsp;|&nbsp;
+  <a href="#examples"><b>Examples</b></a> &nbsp;|&nbsp;
+  <a href="#available-monitors"><b>Monitors</b></a> &nbsp;|&nbsp;
+  <a href="#creating-custom-verifiers-and-monitors"><b>Create your own Monitors</b></a>
+</p>
 
 interwhen is a test-time verification framework for language models that enforces correctness with respect to a set of verifiers. It is designed to improve *instance*-level reliability in reasoning systems, particularly in high-stakes domains where occasional errors are unacceptable.
 
@@ -6,18 +26,50 @@ While modern language models achieve high average performance, aggregate metrics
 
 interwhen addresses the problem by providing a plug-and-play mechanism to improve instance-level reliability of any language model, which we call *verifier-guided reasoning*. Instead of verifying only the final output, the framework enables verification of intermediate reasoning traces during generation. When a violation is detected, the system can steer, revise, or halt generation. If no output is produced, the system abstains; if an output is produced, it satisfies the specified verifiers.
 
+From a research perspective, interwhen makes two contributions:
 
-From a research perspective, interwhen makes two contributions.
+- **A New Axis for Test-Time Scaling** — Introduces verifier compute as an additional dimension of scaling at inference time. Rather than scaling model size or sampling alone, performance can be improved by allocating compute to structured verification.
 
-**A New Axis for Test-Time Scaling**. Introduces verifier compute as an additional dimension of scaling at inference time. Rather than scaling model size or sampling alone, performance can be improved by allocating compute to structured verification.
-
-**A Testbed for Verifier Development**. Enables systematic evaluation of verifier designs at inference time before incorporating them into training objectives (e.g., as reward models or critics).
-
+- **A Testbed for Verifier Development** — Enables systematic evaluation of verifier designs at inference time before incorporating them into training objectives (e.g., as reward models or critics).
 
 A detailed discussion of interwhen, including how it was developed and tested, can be found in our [paper](https://arxiv.org/abs/2602.11202).
 
+<table>
+<tr>
+<td align="center">
+
+<img src="https://github.com/user-attachments/assets/b456273c-efa6-4231-8946-34c234e7607d" alt="Maze" height="300" />
+<br>
+<b>A demo on the Maze dataset. The task is to find the number of right and left turns on the path from the starting to the ending position. The colour green indicates steps that pass verification, while red marks those that failed. The text stream on the right is the verifier output. A higher res mp4 can be found <a href="https://github.com/user-attachments/assets/ce6133c5-b4f4-4578-b9d8-65d4e4475054">here</a>.</b>
+
+</td>
+<td align="center">
+
+<img src="https://github.com/user-attachments/assets/67d3a461-1954-4c09-9c37-cf14db47b9bb" alt="ZebraLogic" height="300" />
+<br>
+<b>A demo on the ZebraLogic dataset. The task is to find the correct assignments given the constraints. The colour green indicates steps that pass verification, while red marks those that failed. The text stream on the right is the verifier output. A higher res mp4 can be found <a href="https://github.com/user-attachments/assets/5b5fc6d8-2239-443b-b26b-6324a9e3556b">here</a>.</b>
+
+</td>
+</tr>
+</table>
+
+## Table of Contents
+
+- [Key Features](#key-features)
+- [Installation](#installation)
+- [Verifiable Reasoning in Three Lines](#verifiable-reasoning-in-three-lines)
+- [Examples](#examples)
+- [Available Monitors](#available-monitors)
+- [Creating Custom Verifiers and Monitors](#creating-custom-verifiers-and-monitors)
+- [How It Works](#how-it-works)
+- [Evaluation](#evaluation)
+- [Intended Uses](#intended-uses)
+- [Limitations](#limitations)
+- [License](#license)
+- [Contact](#contact)
+
 ## Key Features
-interwhen changes the inference pipeline of a language model by creating an auxiliary Monitor model that runs alongside the model and interacts with the model’s output to improve its quality. The Monitor agent reads the output of a language model in real time and calls necessary verifiers to check its validity. 
+interwhen changes the inference pipeline of a language model by creating an auxiliary Monitor that runs alongside the main model and interacts with the model’s output to improve its quality. The Monitor agent reads the output of a language model in real time and calls necessary verifiers to check its validity. 
 
 1. **Verification During Generation**. interwhen verifies reasoning traces as they are produced, without requiring external step extraction or structured decomposition. This allows the model to retain flexible reasoning strategies while remaining subject to correctness constraints.
 
@@ -32,44 +84,6 @@ At a conceptual level, interwhen reframes reliability in language models:
 > Instead of asking whether a model is accurate on average, we ask whether a particular output satisfies explicit, verifiable constraints.
 
 By integrating verification directly into generation, interwhen provides a general mechanism for improving the soundness of reasoning systems without restricting model expressivity or requiring retraining.
-
-## Verifier-guided Reasoning in Three Lines 
-Running verifier-guided inference requires only a few lines of code: just specify the list of monitors to be used with a target LLM. Each monitor requires specifying the kind of verifier, when it should be invoked (e.g., each step or after a reflection token like 'Wait'), and the text pattern to intervene with. 
-
-**Set up target LLM server**
-```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model microsoft/Phi-4-reasoning \
-  --max-model-len 32768 \
-  --port 8001 \
-  --tensor-parallel-size 2
-```
-
-**Generate answer enabled with given monitors**
-```python
-llm_server = init_llm_server("Qwen/Qwen3-30B-A3B-Thinking-2507", max_tokens=32768, port=8000)
-stream_completion(
-    prompt,
-    llm_server=llm_server,
-    monitors=(monitor = StepVerifierMazeMonitor.from_prompt(
-                  prompt_text=user_prompt,
-                  max_corrections=5,
-                  name="maze_step_verifier"),
-    ),
-    async_execution=True
-)
-```
-The above monitor is for Maze dataset, where a maze is given and questions are asked with respect to the maze. We use metaprompting to get the output in the required format that can be parsed by the verifier. The above code implements a simple monitor that watches the model's output stream and verifies if the step proposed by the model is valid or not. You can run the full example:
-```bash
-python ./examples/TTSwithVerification/maze_stepverifier.py).
-```
-
-This is the visualization of the verification running to solve the Maze problem.
-
-
-https://github.com/user-attachments/assets/307a48e8-b139-420c-94f7-07c43bb85806
-
-
 
 ## Installation
 
@@ -93,13 +107,44 @@ Run the following script to reproduce the text replacement example from above.
 python ./examples/text_replacement_example.py
 ```
 
+## Verifiable Reasoning in Three Lines 
+Running verifier-guided inference requires only a few lines of code: just specify the list of monitors to be used with a target LLM. Each monitor requires specifying the kind of verifier, when it should be invoked (e.g., each step or after a reflection token like 'Wait'), and the text pattern to intervene with. 
+
+**Set up target LLM server**
+```bash
+python -m vllm.entrypoints.openai.api_server \
+  --model Qwen/Qwen3-30B-A3B-Thinking-2507 \
+  --max-model-len 65536 \
+  --port 8000 \
+  --tensor-parallel-size 8
+```
+
+**Generate answer enabled with given monitors**
+```python
+llm_server = init_llm_server("Qwen/Qwen3-30B-A3B-Thinking-2507", max_tokens=32768, port=8000)
+stream_completion(
+    prompt,
+    llm_server=llm_server,
+    monitors=(monitor = StepVerifierMazeMonitor.from_prompt(
+                  prompt_text=user_prompt,
+                  max_corrections=5,
+                  name="maze_step_verifier"),
+    ),
+    async_execution=True
+)
+```
+The above example is for the Maze dataset, where a maze is given and questions are asked with respect to the maze, such as how many right turns are present in the path from given starting and ending positions. The above code implements a simple monitor that watches the model's output stream and verifies if the step proposed by the model is valid or not. You can run the full example using the following command:
+```bash
+python ./examples/TTSwithVerification/maze_stepverifier.py.
+```
+
 ## Examples
 
 ### Test-time verification 
-We provide examples using three datasets: Maze, Game of 24, and SpatialMap. 
+We provide examples using 5 datasets datasets: Maze, Game of 24, SpatialMap, Verina, and ZebraLogic.
 
 ```bash
-python ./examples/TTSwithVerification/[your_dataset]_stepverifier.py -n 1 # dataset=maze,game24, or spatialmap
+python ./examples/TTSwithVerification/[your_dataset]_stepverifier.py -n 1 # dataset=maze,game24,spatialmap,verina_code, verina_spec, zebralogic
 ```
 
 ### Monitors for Early stopping
@@ -109,31 +154,22 @@ python ./examples/EarlyStopping/[your_dataset]_example.py -n 1
 
 ## Available Monitors
 
-interwhen includes two families of monitors:
-### Test-Time Verification Monitors
+interwhen provides a diverse suite of monitors:
 
-Improve reasoning accuracy by verifying intermediate steps and injecting corrective feedback when errors are detected.
+| Monitor | Type | Domain | Verification |
+|---------|------|--------|----------|
+| **Game of 24 Step Verifier** | Step Verification | Game of 24 | Arithmetic validation of each step's operation and remaining numbers |
+| **Maze Step Verifier** | Step Verification | Maze Navigation | Grid-based verification of moves, turns, and position tracking |
+| **Spatial Map Step Verifier** | Step Verification | Spatial Reasoning | Z3 constraint solver for directional relationship claims |
+| **ZebraLogic Step Verifier** | Step Verification | Logical Reasoning | Z3 constraint solver for intermediate property assignments |
+| **Verina Code Step Verifier** | Step Verification | Code Generation | Lean4 compile check on generated code |
+| **Verina Spec Step Verifier** | Step Verification | Code Generation | Lean4 compile check on generated specifications |
+| **EAT** | Early Stopping | Any | Entropy variance of next-token drops below threshold |
+| **DEER** | Early Stopping | Any | Geometric mean answer confidence exceeds threshold |
+| **K-Stable Answer (MCQ)** | Early Stopping | MCQs | Same MCQ answer appears *k* consecutive times |
+| **K-Stable Answer (Game of 24)** | Early Stopping | Game of 24 | Same equation appears *k* consecutive times |
 
-| Monitor | Domain | Verifier |
-|---------|--------|----------|
-| **StepVerifierGame24Monitor** | Game of 24 | Arithmetic validation of each step's operation and remaining numbers |
-| **StepVerifierMazeMonitor** | Maze navigation | Grid-based verification of moves, turns, and position tracking |
-| **StepVerifierSpatialMapMonitor** | Spatial reasoning | Z3 constraint solver for directional relationship claims |
-
-📖 **[Full documentation and parameter reference →](./examples/TTSwithVerification/README.md)**
-
-### Early Stopping Monitors
-
-Reduce inference cost by detecting when the model has reached sufficient confidence and terminating generation early.
-
-| Monitor | Strategy | Key Parameter |
-|---------|----------|---------------|
-| **EAT** | Entropy variance of next-token drops below threshold | `delta` (EMA variance threshold) |
-| **DEER** | Geometric mean answer confidence exceeds threshold | `threshold` (confidence threshold) |
-| **KstableAnswerMCQMonitor** | Same MCQ answer appears `k` consecutive times | `k`, `options` |
-| **KstableAnswerGame24Monitor** | Same equation appears `k` consecutive times | `k`, `expected_nums` |
-
-📖 **[Full documentation and parameter reference →](./examples/EarlyStopping/README.md)**
+📖 Full documentation and parameter reference: [Step Verification](./examples/TTSwithVerification/README.md) · [Early Stopping](./examples/EarlyStopping/README.md)
 
 
 ## Creating custom verifiers and monitors
@@ -142,6 +178,26 @@ You can create your own custom monitors by subclassing `VerifyMonitor` in `inter
 - **`step_extractor(chunk, generated_text)`** — Determines *when* to intervene by detecting meaningful reasoning steps in the model's streaming output. Returns a boolean indicating whether a new step has been identified and should be verified.
 - **`verify(chunk, token_index, event, event_info)`** — Checks the correctness of the extracted step using domain-specific logic (symbolic solvers, rule checks, etc.) and signals whether a correction is needed.
 - **`fix(generated_text, event_info)`** — Constructs the corrective feedback that is injected into the model's generation stream to steer it back on track.
+
+## How It Works
+
+![diagram](https://github.com/user-attachments/assets/a0efa3a6-9d12-44ac-8017-63ed2bffaac6)
+
+interwhen operates by interleaving verification with generation. The framework consists of two components running in parallel: a **target LLM** that generates reasoning traces, and one or more **monitors** that watch the output stream and verify intermediate steps in real time.
+
+The process works as follows:
+
+1. **Streaming generation.** The target LLM generates tokens in a streaming fashion. The output is forwarded to all active monitors as it is produced, in an asynchronous fashion.
+
+2. **Step detection.** Each monitor runs a *step extractor* that identifies meaningful reasoning steps in the stream (e.g., a proposed move in a maze, an arithmetic operation in Game of 24, or a code block in Verina). The definition of a "step" is monitor-specific and configurable.
+
+3. **Verification.** When a step is detected, the monitor invokes its verifier — which can be symbolic (e.g., a Z3 constraint solver), tool-based (e.g., a Lean4 compiler), or neural (e.g., an auxiliary LLM) — to check whether the step is valid.
+
+4. **Intervention.** If the verifier detects an error, the monitor injects corrective feedback directly into the generation stream. This steers the target LLM to revise its reasoning without restarting from scratch. If the step is valid, generation continues uninterrupted.
+
+5. **Termination.** Generation ends when the model produces a final answer, a maximum token limit is reached, or an early stopping monitor determines the model has converged (e.g., the same answer has appeared *k* times in a row).
+
+This loop — *generate, extract, verify, intervene* — repeats throughout the reasoning process. Because verification is asynchronous, it adds minimal latency when steps are correct, and only intervenes when necessary. The result is an output that is not just plausible, but verified against explicit correctness constraints.
 
 ## Intended Uses
 - interwhen was developed to improve the quality of a reasoning model’s outputs without requiring finetuning.
@@ -201,5 +257,4 @@ This project may contain trademarks or logos for projects, products, or services
 This research was conducted by members of Microsoft Research.  We welcome feedback and collaboration from our audience. If you have suggestions, questions, or observe unexpected/offensive behavior in our technology, please contact us by posting an issue on Github or at interwhen@microsoft.com.
 
 If the team receives reports of undesired behavior or identifies issues independently, we will update this repository with appropriate mitigations.
-
 
