@@ -15,7 +15,7 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Tuple, Optional
-from interwhen.utils.verina_utils import *
+from interwhen.utils.verina_verifier_utils import *
 import shutil
 import httpx
 import copy
