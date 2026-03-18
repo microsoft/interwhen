@@ -6,3 +6,5 @@ from .thinkingPhaseVerifierGame24 import ThinkingPhaseStepVerifierGame24Monitor
 from .thinkingPhaseVerifierMaze import ThinkingPhaseStepVerifierMazeMonitor
 from .thinkingPhaseVerifierSpatialMap import ThinkingPhaseStepVerifierSpatialMapMonitor
 from .zebralogic_monitor import ZebraLogicMonitor
+from .verina_code_verifier import StepVerifierVerinaMonitor
+from .verina_spec_verifier import StepVerifierVerinaSpecMonitor
