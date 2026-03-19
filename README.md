@@ -265,3 +265,14 @@ This research was conducted by members of Microsoft Research.  We welcome feedba
 
 If the team receives reports of undesired behavior or identifies issues independently, we will update this repository with appropriate mitigations.
 
+## Citation
+If you are using interwhen, please cite the corresponding paper below.
+
+```bibtext
+@article{bhat2026interwhen,
+  title={interwhen: A Generalizable Framework for Verifiable Reasoning with Test-time Monitors},
+  author={Bhat, Vishak K and Chanda, Prateek and Ekbote, Vijval and Khandelwal, Ashmit and Swaroop, Maitreyi and Balasubramanian, Vineeth N and Kambhampati, Subbarao and Natarajan, Nagarajan and Sharma, Amit},
+  journal={arXiv preprint arXiv:2602.11202},
+  year={2026}
+}
+```
