@@ -40,14 +40,14 @@ A detailed discussion of interwhen, including how it was developed and tested, c
 
 <img src="https://github.com/user-attachments/assets/b456273c-efa6-4231-8946-34c234e7607d" alt="Maze" height="300" />
 <br>
-<b>A demo on the Maze dataset. The task is to find the number of right and left turns on the path from the starting to the ending position. The colour green indicates steps that pass verification, while red marks those that failed. The text stream on the right is the verifier output. A higher res mp4 can be found <a href="https://github.com/user-attachments/assets/ce6133c5-b4f4-4578-b9d8-65d4e4475054">here</a>.</b>
+A demo on the Maze dataset. The task is to find the number of right and left turns on the path from the starting to the ending position. The colour green indicates steps that pass verification, while red marks those that failed. The text stream on the right is the verifier output. A higher res mp4 can be found <a href="https://github.com/user-attachments/assets/ce6133c5-b4f4-4578-b9d8-65d4e4475054">here</a>.
 
 </td>
 <td align="center">
 
 <img src="https://github.com/user-attachments/assets/67d3a461-1954-4c09-9c37-cf14db47b9bb" alt="ZebraLogic" height="300" />
 <br>
-<b>A demo on the ZebraLogic dataset. The task is to find the correct assignments given the constraints. The colour green indicates steps that pass verification, while red marks those that failed. The text stream on the right is the verifier output. A higher res mp4 can be found <a href="https://github.com/user-attachments/assets/5b5fc6d8-2239-443b-b26b-6324a9e3556b">here</a>.</b>
+A demo on the ZebraLogic dataset. The task is to find the correct assignments given the constraints. The colour green indicates steps that pass verification, while red marks those that failed. The text stream on the right is the verifier output. A higher res mp4 can be found <a href="https://github.com/user-attachments/assets/5b5fc6d8-2239-443b-b26b-6324a9e3556b">here</a>.
 
 </td>
 </tr>
@@ -140,34 +140,41 @@ python ./examples/TTSwithVerification/maze_stepverifier.py.
 
 ## Examples
 
-### Test-time verification 
-We provide examples using 5 datasets datasets: Maze, Game of 24, SpatialMap, Verina, and ZebraLogic.
+### Improving accuracy through intermediate verification
+We provide examples using 5 datasets: Maze, Game of 24, SpatialMap, Verina, and ZebraLogic.
 
 ```bash
 python ./examples/TTSwithVerification/[your_dataset]_stepverifier.py -n 1 # dataset=maze,game24,spatialmap,verina_code, verina_spec, zebralogic
 ```
 
-### Monitors for Early stopping
+### Early stopping
+Early stopping monitors detect when a model has converged on an answer and terminate generation to save compute. For example, if the model produces the same answer *k* times in a row within its reasoning stream, further generation is unlikely to change the final outcome.
+
 ```bash
 python ./examples/EarlyStopping/[your_dataset]_example.py -n 1
 ```
 
-## Available Monitors
+## Available Monitors and Verifiers
 
-interwhen provides a diverse suite of monitors:
+interwhen provides two types of components: **monitors** that orchestrate when and how to intervene during generation, and **verifiers** that check the correctness of reasoning steps.
 
-| Monitor | Type | Domain | Verification |
-|---------|------|--------|----------|
-| **Game of 24 Step Verifier** | Step Verification | Game of 24 | Arithmetic validation of each step's operation and remaining numbers |
-| **Maze Step Verifier** | Step Verification | Maze Navigation | Grid-based verification of moves, turns, and position tracking |
-| **Spatial Map Step Verifier** | Step Verification | Spatial Reasoning | Z3 constraint solver for directional relationship claims |
-| **ZebraLogic Step Verifier** | Step Verification | Logical Reasoning | Z3 constraint solver for intermediate property assignments |
-| **Verina Code Step Verifier** | Step Verification | Code Generation | Lean4 compile check on generated code |
-| **Verina Spec Step Verifier** | Step Verification | Code Generation | Lean4 compile check on generated specifications |
-| **EAT** | Early Stopping | Any | Entropy variance of next-token drops below threshold |
-| **DEER** | Early Stopping | Any | Geometric mean answer confidence exceeds threshold |
-| **K-Stable Answer (MCQ)** | Early Stopping | MCQs | Same MCQ answer appears *k* consecutive times |
-| **K-Stable Answer (Game of 24)** | Early Stopping | Game of 24 | Same equation appears *k* consecutive times |
+### Monitors
+
+Monitors watch the model's output stream and decide when to invoke verifiers and how to act on their results.
+
+- **Single Trajectory Monitor** : Watches a single generation stream, invokes verifiers on each intermediate state (obtained by forking at trigger points), and injects corrective feedback when a violation is found. This is the default monitor used for step-level verification.
+
+- **K-Stable Monitor** : Tracks whether the model has converged on a stable answer by checking if the same answer appears *k* consecutive times. Used for early stopping to save compute once the model is unlikely to change its output.
+
+### Verifiers
+
+Verifiers provide the domain-specific correctness checks that monitors invoke. Different verifiers return different types of feedback to steer the model.
+
+| Type of Verifier | Type of Feedback | Datasets |
+|------------------|------------------|----------|
+| Z3-based verifier | Feedback on satisfiability | ZebraLogic, SpatialMap |
+| Compiler-based verifier | Compilation error message | Verina |
+| Python code | Custom feedback (eg. "right turn not allowed", <br> "numbers do not add up to 24", etc.) | Maze, Game of 24 |
 
 📖 Full documentation and parameter reference: [Step Verification](./examples/TTSwithVerification/README.md) · [Early Stopping](./examples/EarlyStopping/README.md)
 
