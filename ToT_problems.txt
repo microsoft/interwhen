@@ -1,0 +1,19 @@
+
+thinking model:
+
+Prompt:
+
+for each j:
+  Problem prompt(i) + Proposal Prompt (meta prompt -- steps force krta h) + seed (j)
+
+reasoning1 + (yes)step1   reasoning2 +  (yes)  reasoning3+    reasoning4 +  
+
+
+value prompt: 
+
+reasoning1    reasoning2    reasoning3   reasoning4 
+
+
+
+given a node -- how to get the step
+
