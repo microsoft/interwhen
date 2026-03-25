@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Tuple
  
 from tqdm.asyncio import tqdm_asyncio
  
-import httpx
 import numpy as np
 from datasets import load_dataset
  
@@ -297,33 +296,26 @@ def extract_solution_zebralogic(text):
     return None
  
  
-async def _request_zebralogic_json(prompt: str, llm_server: Dict[str, Any]) -> str:
-    """Submit a strict-JSON request for ZebraLogic and return raw model content."""
-    payload = dict(llm_server["payload"])
-    payload["temperature"] = 0.0
-    payload["messages"] = [
-        {
-            "role": "system",
-            "content": (
-                "You solve Zebra Logic puzzles and MUST return strictly valid JSON only. "
-                "No markdown fences. No explanation. No extra text."
-            ),
-        },
-        {
-            "role": "user",
-            "content": prompt,
-        },
-    ]
-    payload["response_format"] = {"type": "json_object"}
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.post(
-            llm_server["url"],
-            headers=llm_server["headers"],
-            json=payload,
-        )
-        response.raise_for_status()
-        body = response.json()
-        return body["choices"][0]["message"]["content"].strip()
+async def _request_zebralogic_json(
+    prompt: str,
+    llm_server: Dict[str, Any],
+) -> str:
+    """Submit a strict-JSON request for ZebraLogic via stream_completion."""
+    system_prefix = (
+        "You solve Zebra Logic puzzles and MUST return "
+        "strictly valid JSON only. "
+        "No markdown fences. No explanation. No extra text.\n\n"
+    )
+    full_prompt = system_prefix + prompt
+    result = await stream_completion(
+        full_prompt,
+        llm_server=llm_server,
+        monitors=[],
+        add_delay=False,
+        termination_requires_validation=False,
+        async_execution=True,
+    )
+    return result.strip()
  
  
 async def finalize_zebralogic_json(problem: str, trajectory: str, llm_server: Dict[str, Any]) -> str:
@@ -346,7 +338,7 @@ async def solve_zebralogic_json_direct(problem: str, llm_server: Dict[str, Any])
         "Solve the Zebra Logic puzzle and provide the final house assignments.\n"
         "Output ONLY valid JSON with keys like 'House 1', 'House 2', etc.\n"
         "Use exact feature/value names from the puzzle text.\n\n"
-        "PUZZLE:\n"
+        "PUZZLE:\n" 
         f"{problem}\n"
     )
     return await _request_zebralogic_json(prompt, llm_server)
