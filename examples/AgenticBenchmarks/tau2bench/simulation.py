@@ -388,6 +388,13 @@ class BaseRunConfig(BaseModel):
             default=False,
         ),
     ]
+    user_persona_config: Annotated[
+        Optional[PersonaConfig],
+        Field(
+            description="Persona configuration for the user simulator (mainly for text runs).",
+            default=None,
+        ),
+    ]
 
     # ---- Retry ----
     max_retries: Annotated[
@@ -1211,7 +1218,7 @@ class Info(BaseModel):
     )
     text_streaming_config: Optional[dict] = Field(
         description="Text streaming configuration",
-        default=deepcopy(DEFAULT_TEXT_STREAMING_CONFIG),
+        default_factory=lambda: deepcopy(DEFAULT_TEXT_STREAMING_CONFIG),
     )
     speech_complexity: Optional[SpeechComplexity] = Field(
         description="Speech complexity level for audio-native mode",

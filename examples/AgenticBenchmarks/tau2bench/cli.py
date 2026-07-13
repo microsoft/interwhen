@@ -581,7 +581,7 @@ def main():
     def run_command(args):
         user_persona_config = None
         if args.user_persona:
-            user_persona_config = PersonaConfig.from_dict(args.user_persona)  # noqa: F841
+            user_persona_config = PersonaConfig.from_dict(args.user_persona)
 
         # Build audio-native config if enabled
         audio_native_config = None
@@ -651,6 +651,7 @@ def main():
             hallucination_retries=args.hallucination_retries,
             retrieval_config=args.retrieval_config,
             retrieval_config_kwargs=args.retrieval_config_kwargs,
+            user_persona_config=user_persona_config,
         )
 
         if audio_native_config is not None:

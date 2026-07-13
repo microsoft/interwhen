@@ -170,10 +170,11 @@ def load_tasks_split(path: str) -> Optional[dict[str, list[str]]]:
 
 def get_tasks(task_split_name: Optional[str] = "base") -> list[Task]:
     tasks = load_tasks(TELECOM_TASK_SET_PATH)
-    tasks = [Task.model_validate(task) for task in tasks]
     if task_split_name is None:
         return tasks
     task_splits = get_tasks_split()
+    if not task_splits:
+        raise ValueError(f"No task split file found for: {TELECOM_TASK_SET_PATH}")
     if task_split_name not in task_splits:
         raise ValueError(
             f"Invalid task split name: {task_split_name}. Valid splits are: {task_splits.keys()}"
@@ -181,17 +182,18 @@ def get_tasks(task_split_name: Optional[str] = "base") -> list[Task]:
     return [task for task in tasks if task.id in task_splits[task_split_name]]
 
 
-def get_tasks_split() -> dict[str, list[str]]:
+def get_tasks_split() -> Optional[dict[str, list[str]]]:
     return load_tasks_split(TELECOM_TASK_SET_PATH)
 
 
 def get_tasks_solo(task_split_name: Optional[str] = "base") -> list[Task]:
     """Load solo-mode tasks (with updated ticket text) from tasks_solo.json."""
     tasks = load_tasks(TELECOM_TASK_SET_SOLO_PATH)
-    tasks = [Task.model_validate(task) for task in tasks]
     if task_split_name is None:
         return tasks
     task_splits = get_tasks_solo_split()
+    if not task_splits:
+        raise ValueError(f"No task split file found for: {TELECOM_TASK_SET_SOLO_PATH}")
     if task_split_name not in task_splits:
         raise ValueError(
             f"Invalid task split name: {task_split_name}. Valid splits are: {task_splits.keys()}"
@@ -199,7 +201,7 @@ def get_tasks_solo(task_split_name: Optional[str] = "base") -> list[Task]:
     return [task for task in tasks if task.id in task_splits[task_split_name]]
 
 
-def get_tasks_solo_split() -> dict[str, list[str]]:
+def get_tasks_solo_split() -> Optional[dict[str, list[str]]]:
     return load_tasks_split(TELECOM_TASK_SET_SOLO_PATH)
 
 

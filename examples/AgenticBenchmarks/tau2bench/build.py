@@ -368,7 +368,7 @@ def build_text_orchestrator(
     if getattr(config, "enable_tool_call_verifier", False) and domain in ("airline", "retail", "telecom"):
         from tau2.verifier.verifier import PolicyVerifier
         tool_call_verifier = PolicyVerifier(db=environment.tools.db, domain=domain)
-        logger.info("Policy verifier enabled for domain=%s", domain)
+        logger.info(f"Policy verifier enabled for domain={domain}")
 
     agent = build_agent(
         config.effective_agent,
