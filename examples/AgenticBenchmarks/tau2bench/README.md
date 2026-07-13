@@ -3,6 +3,22 @@
 
 **Note:** The code provided in this folder is built on top of the original code for tau2bench, found at https://github.com/sierra-research/tau2-bench. In each file, we have mentioned the changes we have made, and the code we have used verbatim, relative to the same file in the original Tau2Bench repo.
 
+## 0. Install `uv`
+
+The upstream project uses [`uv`](https://docs.astral.sh/uv/) to manage its
+Python environment. Install it once (skip if `uv --version` already works):
+
+```bash
+# Install uv via the official standalone installer
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Make uv available in the current shell (new shells pick it up automatically)
+source $HOME/.local/bin/env
+
+# Verify
+uv --version
+```
+
 ## 1. Clone the upstream tau2-bench repo
 
 ```bash
@@ -16,14 +32,17 @@ upstream `main` branch.
 
 ## 2. Overlay the modified files
 
-| Source (in the current dir) | Destination in clone | Purpose |
+The overlay files live in subfolders of this directory (`verifiers/`) as well as
+a few flat files at the root. The `Source` column below is the path **relative
+to this folder**.
+
+| Source (relative to this folder) | Destination in clone | Purpose |
 |---|---|---|
-| `verifier.py` | `src/tau2/verifier/verifier.py` | `PolicyVerifier` — wires Lean PRE/POST checks + Python rules + SLM helper |
-| `telecom_glue_spec.py` | `src/tau2/verifier/telecom_glue_spec.py` | HGlue mapping tau2 tool calls + DB state to Lean `check_all` requests |
-| `telecom_policy_spec.py` | `src/tau2/verifier/telecom_policy_spec.py` | Curated Python rules and Policy spec object used by the verifier to know which rules apply where |
-| `telecom_python_rules.py` | `src/tau2/verifier/telecom_python_rules.py` | Python pre/post rules (escalation, phone normalization, ticket reasoning, etc.) run after lean rules |
-| `slm_helper.py` | `src/tau2/verifier/slm_helper.py` | `slm_extract` — calls a small LLM to extract structured fields from free-form tool args; required by many Python rules |
-| `policychecker_telecom` | `bin/policychecker_telecom` | Prebuilt Lean policy checker binary (~387 MB). Send JSON over stdin, get verdict over stdout. |
+| `verifiers/verifier_python/verifier.py` | `src/tau2/verifier/verifier.py` | `PolicyVerifier` — wires Python pre/post rules + SLM helper (uses `telecom_policy_spec`; Lean glue only when `TAU2_USE_AUTO_GLUE` is set) |
+| `verifiers/verifier_lean/telecom_glue_spec.py` | `src/tau2/verifier/telecom_glue_spec.py` | HGlue mapping tau2 tool calls + DB state to Lean `check_all` requests |
+| `verifiers/verifier_python/telecom_policy_spec.py` | `src/tau2/verifier/telecom_policy_spec.py` | Curated Python rules and Policy spec object used by the verifier to know which rules apply where |
+| `verifiers/verifier_lean/telecom_python_rules.py` | `src/tau2/verifier/telecom_python_rules.py` | Python pre/post rules (escalation, phone normalization, ticket reasoning, etc.) run after lean rules |
+| `verifiers/verifier_lean/slm_helper.py` | `src/tau2/verifier/slm_helper.py` | `slm_extract` — calls a small LLM to extract structured fields from free-form tool args; required by many Python rules |
 | `orchestrator.py` | `src/tau2/orchestrator/orchestrator.py` | Drop-in replacement that self-instantiates the verifier when `TAU2_VERIFIER=1` (the default). Also skips `[VERIFIER]` user messages during checkpoint replay. |
 | `llm_agent.py` | `src/tau2/agent/llm_agent.py` | Agent updates |
 | `user_simulator.py` | `src/tau2/user/user_simulator.py` | User simulator updates |
@@ -32,24 +51,26 @@ upstream `main` branch.
 | `environment_telecom.py` | `src/tau2/domains/telecom/environment.py` | Adds `get_tasks_solo()` / `get_tasks_solo_split()` loaders |
 | `utils_telecom.py` | `src/tau2/domains/telecom/utils.py` | Adds `TELECOM_TASK_SET_SOLO_PATH` |
 | `registry.py` | `src/tau2/registry.py` | Registers the `telecom_solo` task set |
-| `runner/batch.py` | `src/tau2/runner/batch.py` | Auto-swaps `telecom` -> `telecom_solo` when the chosen agent has `solo_mode=True` metadata |
+| `batch.py` | `src/tau2/runner/batch.py` | Auto-swaps `telecom` -> `telecom_solo` when the chosen agent has `solo_mode=True` metadata |
+| `cli.py` | `src/tau2/cli.py` | CLI updates |
+| `simulation.py` | `src/tau2/data_model/simulation.py` | Simulation data-model updates |
+| `build.py` | `src/tau2/runner/build.py` | Runner build updates |
 | `tasks_solo.json` | `data/tau2/domains/telecom/tasks_solo.json` | 114 telecom tasks rewritten so each ticket is self-contained (works without a user simulator) |
 | `split_tasks_solo.json` | `data/tau2/domains/telecom/split_tasks_solo.json` | Task-id splits (`base`, `train`, `test`, …) for the solo task set |
 
 Copy them in:
 
 ```bash
-SRC=/path/to/this/readme/folder   # flat dir containing files above
+SRC=/path/to/this/readme/folder   # this folder (contains verifiers/ and the root files)
 DST=/path/to/upstream/tau2-bench
 
+# Source path (relative to SRC) -> destination path (relative to DST)
 declare -A MAP=(
-  [verifier.py]=src/tau2/verifier/verifier.py
-  [telecom_glue_spec.py]=src/tau2/verifier/telecom_glue_spec.py
-  [telecom_policy_spec.py]=src/tau2/verifier/telecom_policy_spec.py
-  [telecom_python_rules.py]=src/tau2/verifier/telecom_python_rules.py
-  [slm_helper.py]=src/tau2/verifier/slm_helper.py
-  [completion_transfer.py]=src/tau2/verifier/completion_transfer.py
-  [policychecker_telecom]=bin/policychecker_telecom
+  [verifiers/verifier_python/verifier.py]=src/tau2/verifier/verifier.py
+  [verifiers/verifier_lean/telecom_glue_spec.py]=src/tau2/verifier/telecom_glue_spec.py
+  [verifiers/verifier_python/telecom_policy_spec.py]=src/tau2/verifier/telecom_policy_spec.py
+  [verifiers/verifier_lean/telecom_python_rules.py]=src/tau2/verifier/telecom_python_rules.py
+  [verifiers/verifier_lean/slm_helper.py]=src/tau2/verifier/slm_helper.py
   [orchestrator.py]=src/tau2/orchestrator/orchestrator.py
   [llm_agent.py]=src/tau2/agent/llm_agent.py
   [user_simulator.py]=src/tau2/user/user_simulator.py
@@ -71,9 +92,58 @@ for src in "${!MAP[@]}"; do
   mkdir -p "$DST/$(dirname "$dst")"
   cp "$SRC/$src" "$DST/$dst"
 done
-
-chmod +x "$DST/bin/policychecker_telecom"
 ```
+
+The overlaid `simulation.py` adds an `enable_tool_call_verifier` field and imports
+two constants that upstream `main` doesn't define yet. Add them to the clone's
+`src/tau2/config.py` (near the other `DEFAULT_*` agent-behavior constants) so the
+import chain resolves:
+
+```bash
+cat >> "$DST/src/tau2/config.py" <<'EOF'
+
+# Added for the interwhen overlay (required by the overlaid simulation.py)
+DEFAULT_BUFFER_UNTIL_COMPLETE = False  # overridable
+DEFAULT_FAST_FORWARD_MODE = False  # overridable
+EOF
+```
+
+> Without these, `tau2 run` fails with
+> `ImportError: cannot import name 'DEFAULT_BUFFER_UNTIL_COMPLETE' from 'tau2.config'`.
+
+### (Optional) Build the Lean policy-checker binary
+
+The default run uses the **Python verifier** (`verifiers/verifier_python/`), which
+needs no Lean binary — so `policychecker_telecom` is **not shipped** and **not
+required** for the reference run below. Only build it if you want the **Lean**
+verifier variant (`verifiers/verifier_lean/`, activated by setting
+`TAU2_USE_AUTO_GLUE=1`).
+
+To generate `bin/policychecker_telecom`:
+
+```bash
+# 1. Install elan (the Lean toolchain manager). The pinned toolchain in
+#    verifiers/verifier_lean/lean-toolchain (leanprover/lean4:v4.30.0-rc2) is
+#    fetched automatically by lake on first build.
+curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
+source "$HOME/.elan/env"
+
+# 2. From the Lean project, pull the prebuilt mathlib cache (large download;
+#    avoids compiling mathlib v4.30.0-rc2 from source) and build the binary.
+cd "$SRC/verifiers/verifier_lean"
+lake exe cache get      # downloads prebuilt mathlib artifacts
+lake build              # produces the `policychecker` executable (~387 MB)
+
+# 3. Drop the binary into the clone and point the verifier at it.
+mkdir -p "$DST/bin"
+cp .lake/build/bin/policychecker "$DST/bin/policychecker_telecom"
+chmod +x "$DST/bin/policychecker_telecom"
+export TAU2_LEAN_BINARY="$DST/bin/policychecker_telecom"
+export TAU2_USE_AUTO_GLUE=1   # tell the verifier to use the Lean glue path
+```
+
+> Note: building mathlib without the cache can take a long time and significant
+> disk/RAM. If you only need the Python verifier, skip this entire section.
 
 ## 3. Python environment
 
@@ -97,7 +167,9 @@ python -m vllm.entrypoints.openai.api_server \
     --served-model-name Qwen/Qwen3-30B-A3B-Thinking-2507 \
     --port 8000 \
     --tensor-parallel-size 4 \
-    --max-model-len 32768
+    --max-model-len 32768 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes
 ```
 
 ### 4b. SLM vLLM (port 8001)
@@ -117,7 +189,6 @@ python -m vllm.entrypoints.openai.api_server \
 ## 5. Required environment variables
 
 ```bash
-export TAU2_LEAN_BINARY="$DST/bin/policychecker_telecom"
 export TAU2_VERIFIER=1                           # default; set 0 to disable verifier
 export TAU2_POLICY_TODAY=2025-02-25              # date the Lean policy treats as "today"
 export TAU2_VERIFIER_STATS_DIR="$DST/data/simulations/_stats"
@@ -135,6 +206,7 @@ The reference command (114 telecom tasks, 1 trial, solo agent, dummy user,
 verifier on, Qwen3 as agent):
 
 ```bash
+# export OPENAI_API_KEY=<key> this is used for the evaluation purpose
 SLM_API_BASE=http://localhost:8001/v1 \
 uv run tau2 run \
     --domain telecom \
