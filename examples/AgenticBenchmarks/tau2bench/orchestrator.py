@@ -146,7 +146,7 @@ class BaseOrchestrator(ABC, Generic[BaseAgentT, BaseUserT, TrajectoryItemT]):
         if (
             self.tool_call_verifier is None
             and os.getenv("TAU2_VERIFIER", "1") != "0"
-            and domain in ("airline", "retail", "telecom")
+            and domain in ("airline", "retail", "telecom", "telecom-workflow")
         ):
             from tau2.verifier.verifier import PolicyVerifier
             self.tool_call_verifier = PolicyVerifier(db=environment.tools.db, domain=domain)

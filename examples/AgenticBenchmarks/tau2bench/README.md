@@ -9,8 +9,11 @@ The upstream project uses [`uv`](https://docs.astral.sh/uv/) to manage its
 Python environment. Install it once (skip if `uv --version` already works):
 
 ```bash
-# Install uv via the official standalone installer
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# Install uv via the official standalone installer.
+# Download the script first (inspect it if you like), then run it — safer than
+# piping a remote script straight into a shell.
+curl -LsSf https://astral.sh/uv/install.sh -o uv-install.sh
+sh uv-install.sh
 
 # Make uv available in the current shell (new shells pick it up automatically)
 source $HOME/.local/bin/env
@@ -206,7 +209,7 @@ The reference command (114 telecom tasks, 1 trial, solo agent, dummy user,
 verifier on, Qwen3 as agent):
 
 ```bash
-# export OPENAI_API_KEY=<key> this is used for the evaluation purpose
+# export OPENAI_API_KEY=<key>   # used for evaluation purposes
 SLM_API_BASE=http://localhost:8001/v1 \
 uv run tau2 run \
     --domain telecom \

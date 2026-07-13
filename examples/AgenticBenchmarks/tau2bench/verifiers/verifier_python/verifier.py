@@ -121,6 +121,10 @@ class PolicyVerifier:
         max_nudges: int = 2,
     ):
         self.db = db
+        # telecom-workflow shares the telecom tool-call policy/spec, so treat it
+        # as "telecom" for verification purposes.
+        if domain == "telecom-workflow":
+            domain = "telecom"
         self.domain = domain
         self.cheap_only = cheap_only
         self.max_feedback_per_tool = max_feedback_per_tool

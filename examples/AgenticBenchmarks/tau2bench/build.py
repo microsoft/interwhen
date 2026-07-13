@@ -111,8 +111,8 @@ def build_agent(
             user_tools = environment.get_user_tools()
             if user_tools:
                 tools = tools + user_tools
-        except Exception as e:
-            logger.warning(f"Failed to load user tools in solo mode: {e}")
+        except ValueError as e:
+            logger.debug(f"No user tools available in solo mode: {e}")
 
     return agent_factory(
         tools=tools,
@@ -365,7 +365,12 @@ def build_text_orchestrator(
 
     # Build policy verifier if enabled
     tool_call_verifier = None
-    if getattr(config, "enable_tool_call_verifier", False) and domain in ("airline", "retail", "telecom"):
+    if getattr(config, "enable_tool_call_verifier", False) and domain in (
+        "airline",
+        "retail",
+        "telecom",
+        "telecom-workflow",
+    ):
         from tau2.verifier.verifier import PolicyVerifier
         tool_call_verifier = PolicyVerifier(db=environment.tools.db, domain=domain)
         logger.info(f"Policy verifier enabled for domain={domain}")
