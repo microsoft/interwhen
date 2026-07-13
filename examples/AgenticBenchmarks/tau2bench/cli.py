@@ -244,7 +244,7 @@ def add_run_args(parser):
     parser.add_argument(
         "--audio-native-provider",
         type=str,
-        choices=["openai", "gemini", "xai"],
+        choices=["openai", "gemini", "xai", "nova", "qwen", "deepgram", "livekit"],
         default=DEFAULT_AUDIO_NATIVE_PROVIDER,
         help=f"Audio native API provider. 'openai' uses OpenAI Realtime API, "
         f"'gemini' uses Google Gemini Live API, 'xai' uses xAI Grok Voice Agent API. "
@@ -597,6 +597,8 @@ def main():
             use_xml_prompt = False
             if args.xml_prompt:
                 use_xml_prompt = True
+            elif args.no_xml_prompt:
+                use_xml_prompt = False
 
             audio_native_config = AudioNativeConfig(
                 # Provider

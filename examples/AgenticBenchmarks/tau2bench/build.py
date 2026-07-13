@@ -111,8 +111,8 @@ def build_agent(
             user_tools = environment.get_user_tools()
             if user_tools:
                 tools = tools + user_tools
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to load user tools in solo mode: {e}")
 
     return agent_factory(
         tools=tools,
@@ -162,8 +162,8 @@ def build_user(
         user_tools = None
 
     # Validate DummyUser usage
-    if issubclass(UserConstructor, DummyUser):
-        assert solo_mode, "Dummy user can only be used with solo agent"
+    if issubclass(UserConstructor, DummyUser) and not solo_mode:
+        raise ValueError("Dummy user can only be used with solo agent")
 
     user_kwargs = {
         "tools": user_tools,
@@ -545,6 +545,9 @@ def build_orchestrator(
     Returns:
         A fully constructed Orchestrator or FullDuplexOrchestrator.
     """
+    if user_persona_config is None:
+        user_persona_config = getattr(config, "user_persona_config", None)
+
     if isinstance(config, VoiceRunConfig):
         return build_voice_orchestrator(
             config,

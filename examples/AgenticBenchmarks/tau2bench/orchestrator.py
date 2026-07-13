@@ -139,9 +139,15 @@ class BaseOrchestrator(ABC, Generic[BaseAgentT, BaseUserT, TrajectoryItemT]):
         self.task = task
         self.seed = seed
         self.simulation_id = simulation_id or str(uuid.uuid4())
-        # self.tool_call_verifier = tool_call_verifier
-        self.tool_call_verifier = None
-        if os.getenv("TAU2_VERIFIER", "1") != "0" and domain in ("airline", "retail", "telecom"):
+        # Prefer an explicitly provided verifier (e.g. from build.py when
+        # `enable_tool_call_verifier` is set); otherwise fall back to the
+        # env-driven default so behavior is unchanged when none is passed.
+        self.tool_call_verifier = tool_call_verifier
+        if (
+            self.tool_call_verifier is None
+            and os.getenv("TAU2_VERIFIER", "1") != "0"
+            and domain in ("airline", "retail", "telecom")
+        ):
             from tau2.verifier.verifier import PolicyVerifier
             self.tool_call_verifier = PolicyVerifier(db=environment.tools.db, domain=domain)
 

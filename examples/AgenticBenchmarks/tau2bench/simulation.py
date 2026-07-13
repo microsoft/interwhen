@@ -1678,10 +1678,12 @@ class Results(BaseModel):
     def to_df(self) -> pd.DataFrame:
         """Convert a Results object to a pandas DataFrame."""
         rows = []
+        tasks_by_id = {t.id: t for t in self.tasks}
         for sim in self.simulations:
             row = self._sim_to_row(sim, self.info)
-            task = next(t for t in self.tasks if t.id == sim.task_id)
-            row.update(self._task_metrics(task))
+            task = tasks_by_id.get(sim.task_id)
+            if task:
+                row.update(self._task_metrics(task))
             rows.append(row)
         return pd.DataFrame(rows)
 
