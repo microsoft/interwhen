@@ -1,4 +1,15 @@
 """
+This file is based on the original tau2-bench repo
+(https://github.com/sierra-research/tau2-bench), file tau2-bench/src/tau2/runner/build.py.
+Changes made for the interwhen overlay (the rest follows the original file):
+1. Build a PolicyVerifier and pass it to the Orchestrator when
+   config.enable_tool_call_verifier is set (airline / retail / telecom /
+   telecom-workflow domains).
+2. build_orchestrator() defaults user_persona_config from config.user_persona_config.
+3. build_agent(): catch ValueError and log at debug instead of silently
+   swallowing user-tool load failures in solo mode.
+4. Raise ValueError instead of assert when DummyUser is used without solo_mode.
+
 Layer 2: Build functions.
 
 Turn config/names into live instances (environment, agent, user, orchestrator).

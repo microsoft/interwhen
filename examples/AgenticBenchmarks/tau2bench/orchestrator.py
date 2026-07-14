@@ -10,7 +10,7 @@ Also added code to read env vars to activate verification
 3. added _build_conversation_for_verifier method to build conversation history for the verifier
 4. added _strip_thinking method to clean model output for the verifier. integrated this in Orchestrator.initialize()
 5. Made changes to orchestrator.step() function in order to integrate the tool_call_verifier
-6. 
+6. Prefer an explicitly passed tool_call_verifier over env-driven self-instantiation, and include the telecom-workflow domain
 """
 
 import json

@@ -1,4 +1,14 @@
-# Copyright Sierra
+"""
+This file is based on the original tau2-bench repo from Sierra Research
+(https://github.com/sierra-research/tau2-bench), file
+tau2-bench/src/tau2/domains/telecom/environment.py.
+Changes made for the interwhen overlay (the rest follows the original file):
+1. Added the TELECOM_TASK_SET_SOLO_PATH import.
+2. Added get_tasks_solo() and get_tasks_solo_split() loaders for the solo-mode
+   telecom task set (tasks_solo.json).
+3. Hardened get_tasks()/get_tasks_solo() to raise a clear error when the split
+   file is missing; annotated the split loaders as Optional.
+"""
 from functools import partial
 from pathlib import Path
 from typing import Optional

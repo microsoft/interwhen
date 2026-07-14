@@ -97,23 +97,6 @@ for src in "${!MAP[@]}"; do
 done
 ```
 
-The overlaid `simulation.py` adds an `enable_tool_call_verifier` field and imports
-two constants that upstream `main` doesn't define yet. Add them to the clone's
-`src/tau2/config.py` (near the other `DEFAULT_*` agent-behavior constants) so the
-import chain resolves:
-
-```bash
-cat >> "$DST/src/tau2/config.py" <<'EOF'
-
-# Added for the interwhen overlay (required by the overlaid simulation.py)
-DEFAULT_BUFFER_UNTIL_COMPLETE = False  # overridable
-DEFAULT_FAST_FORWARD_MODE = False  # overridable
-EOF
-```
-
-> Without these, `tau2 run` fails with
-> `ImportError: cannot import name 'DEFAULT_BUFFER_UNTIL_COMPLETE' from 'tau2.config'`.
-
 ### (Optional) Build the Lean policy-checker binary
 
 The default run uses the **Python verifier** (`verifiers/verifier_python/`), which

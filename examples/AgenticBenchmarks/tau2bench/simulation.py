@@ -1,3 +1,16 @@
+"""
+This file is based on the original tau2-bench repo
+(https://github.com/sierra-research/tau2-bench), file
+tau2-bench/src/tau2/data_model/simulation.py.
+Changes made for the interwhen overlay (the rest follows the original file):
+1. Added the enable_tool_call_verifier and user_persona_config fields to BaseRunConfig.
+2. Use default_factory for text_streaming_config to avoid a shared mutable default.
+3. Results.to_df() tolerates missing tasks instead of raising StopIteration.
+4. Define DEFAULT_BUFFER_UNTIL_COMPLETE / DEFAULT_FAST_FORWARD_MODE locally
+   (default False) instead of importing them, so the overlay does not require
+   patching tau2/config.py.
+"""
+
 import json
 from collections.abc import Iterator
 from copy import deepcopy
@@ -20,8 +33,6 @@ from tau2.config import (
     DEFAULT_BACKCHANNEL_MAX_THRESHOLD_SECONDS,
     DEFAULT_BACKCHANNEL_MIN_THRESHOLD_SECONDS,
     DEFAULT_BACKCHANNEL_POISSON_RATE,
-    DEFAULT_BUFFER_UNTIL_COMPLETE,
-    DEFAULT_FAST_FORWARD_MODE,
     DEFAULT_INTEGRATION_DURATION_SECONDS,
     DEFAULT_INTERRUPTION_CHECK_INTERVAL_SECONDS,
     DEFAULT_LLM_AGENT,
@@ -50,6 +61,12 @@ from tau2.config import (
     DEFAULT_YIELD_THRESHOLD_WHEN_INTERRUPTED_SECONDS,
     DEFAULT_YIELD_THRESHOLD_WHEN_INTERRUPTING_SECONDS,
 )
+
+# Defined locally (default False) instead of imported from tau2.config, so the
+# overlay works on an older upstream clone that doesn't define these yet.
+DEFAULT_BUFFER_UNTIL_COMPLETE = False
+DEFAULT_FAST_FORWARD_MODE = False
+
 from tau2.data_model.audio_effects import EffectTimeline
 from tau2.data_model.message import Message, Tick
 from tau2.data_model.persona import PersonaConfig

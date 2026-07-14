@@ -1,3 +1,13 @@
+"""
+This file is based on the original tau2-bench repo
+(https://github.com/sierra-research/tau2-bench), file tau2-bench/src/tau2/cli.py.
+Changes made for the interwhen overlay (the rest follows the original file):
+1. Added the --enable-tool-call-verifier flag and threaded it into the RunConfig.
+2. Parse --user-persona into user_persona_config and pass it through to the RunConfig.
+3. Widened --audio-native-provider choices to match AudioNativeConfig.provider.
+4. Honor --no-xml-prompt when resolving use_xml_prompt.
+"""
+
 import argparse
 import json
 
