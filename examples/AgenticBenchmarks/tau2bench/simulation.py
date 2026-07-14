@@ -4,7 +4,7 @@ This file is based on the original tau2-bench repo
 tau2-bench/src/tau2/data_model/simulation.py.
 Changes made for the interwhen overlay (the rest follows the original file):
 1. Added the enable_tool_call_verifier and user_persona_config fields to BaseRunConfig.
-2. Use default_factory for text_streaming_config to avoid a shared mutable default.
+2. Use default_factory for Info.text_streaming_config to avoid a shared mutable default.
 3. Results.to_df() tolerates missing tasks instead of raising StopIteration.
 4. Define DEFAULT_BUFFER_UNTIL_COMPLETE / DEFAULT_FAST_FORWARD_MODE locally
    (default False) instead of importing them, so the overlay does not require

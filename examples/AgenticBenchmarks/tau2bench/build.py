@@ -163,7 +163,7 @@ def build_user(
         A fully constructed half-duplex user instance.
 
     Raises:
-        AssertionError: If DummyUser is used without solo_mode.
+        ValueError: If DummyUser is used without solo_mode.
     """
     UserConstructor = registry.get_user_constructor(user_name)
 
